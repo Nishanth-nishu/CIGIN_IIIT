@@ -32,3 +32,8 @@ jupyterlab
 # dgl-cu118  # CUDA 11.8
 # or just:
 # dgl        # for CPU version
+
+# *Important* if you got error in importing dgl please do this steps given below
+# setp 1: go to:<your_env>/Lib/site-packages/dgl/graphbolt/__init__.py
+# step 2: Comment out or remove the load_graphbolt() call: # load_graphbolt()
+
