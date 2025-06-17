@@ -1,0 +1,26 @@
+# Ignore virtual environments
+venv/
+cigin_env/
+.env/
+
+__pycache__/
+*.pyc
+.DS_Store
+
+# Ignore logs and cache
+*.log
+*.sqlite3
+
+# Ignore system files
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore model and data files
+*.tar
+*.pth
+*.pt
+runs/
