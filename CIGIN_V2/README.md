@@ -4,7 +4,7 @@
 * Create a new conda environment using:\
     `$ conda create -n cigin`
 * Installing RDKit:\
-    `$ conda install -c rdkit rdkit==2019.03.1`
+    `$ conda install -c rdkit rdkit>=2019.03.1`
 * Installing other dependencies:\
     `$ conda install -c pytorch pytorch `\
     `$ pip install dgl` (Please check [here](https://www.dgl.ai/pages/start.html) for 
