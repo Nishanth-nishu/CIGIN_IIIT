@@ -7,7 +7,7 @@
     `$ conda install -c rdkit rdkit==2019.03.1`
 * Installing other dependencies:\
     `$ conda install -c pytorch pytorch `\
-    `$ pip install dgl` (Please check [here](https://docs.dgl.ai/en/0.4.x/install/) for 
+    `$ pip install dgl` (Please check [here](https://www.dgl.ai/pages/start.html) for 
      installing for different cuda builds)\
      `$ pip install numpy`\
      `$ pip install pandas`
