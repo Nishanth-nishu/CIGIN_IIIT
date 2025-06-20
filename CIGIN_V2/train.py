@@ -8,12 +8,12 @@ import traceback
 loss_fn = torch.nn.MSELoss()
 mae_loss_fn = torch.nn.L1Loss()
 
-# Force CPU usage for now (update as needed)
+# CPU usage for now 
 device = torch.device("cpu")
 
-# ⚙️ Label normalization constants (you must compute these from your dataset!)
-LABEL_MEAN = -3.82  # example mean
-LABEL_STD = 1.21    # example std
+# Label normalization constants (compute these from the dataset!)
+LABEL_MEAN = -3.82  
+LABEL_STD = 1.21    
 
 def normalize_labels(labels):
     return (labels - LABEL_MEAN) / LABEL_STD
