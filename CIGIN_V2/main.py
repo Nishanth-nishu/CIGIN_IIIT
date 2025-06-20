@@ -4,6 +4,7 @@ import warnings
 import os
 import argparse
 import sys
+import multiprocessing
 import traceback
 # rdkit imports
 from rdkit import RDLogger, Chem
@@ -40,12 +41,21 @@ parser.add_argument('--interaction', default='dot',
                     help="Interaction: dot | scaled-dot | general | tanh-general")
 parser.add_argument('--max_epochs', default=100, type=int, help="Max epochs")
 parser.add_argument('--batch_size', default=4, type=int, help="Batch size")
+parser.add_argument('--use_transformer', action='store_true', 
+                    help="Use Transformer aggregation instead of Set2Set")
+parser.add_argument('--transformer_heads', default=4, type=int,
+                    help="Number of attention heads for transformer (default: 4)")
+parser.add_argument('--transformer_layers', default=2, type=int,
+                    help="Number of transformer layers (default: 2)")
 args = parser.parse_args()
 
 project_name = args.name
 interaction = args.interaction
 max_epochs = args.max_epochs
 batch_size = args.batch_size
+use_transformer = args.use_transformer
+transformer_heads = args.transformer_heads
+transformer_layers = args.transformer_layers
 
 # Force CPU for determinism
 device = torch.device("cpu")
@@ -100,47 +110,20 @@ def load_data():
         traceback.print_exc()
         return None, None
 
-def safe_collate(samples):
-    """Collate function with validation and fallback."""
-    try:
-        valid = [s for s in samples if s is not None]
-        if not valid:
-            raise ValueError("No valid samples to collate")
-        
-        sol_gs, solv_gs, labels = zip(*valid)
-        
-        sol_valid, solv_valid, valid_labels = [], [], []
-        for i, (sg, vg, lab) in enumerate(zip(sol_gs, solv_gs, labels)):
-            try:
-                if sg is not None and vg is not None \
-                   and 'x' in sg.ndata and 'x' in vg.ndata \
-                   and sg.ndata['x'].shape[1] == 42 \
-                   and vg.ndata['x'].shape[1] == 42:
-                    sol_valid.append(sg)
-                    solv_valid.append(vg)
-                    valid_labels.append(float(lab))
-            except Exception as er:
-                print(f"⚠️  Skipping sample {i}: {er}")
-        
-        if not sol_valid:
-            raise ValueError("No valid graph pairs after filtering")
-        
-        sol_batch = dgl.batch(sol_valid)
-        solv_batch = dgl.batch(solv_valid)
-        
-        sol_sizes = sol_batch.batch_num_nodes().tolist()
-        solv_sizes = solv_batch.batch_num_nodes().tolist()
-        
-        sol_len = get_len_matrix(sol_sizes)
-        solv_len = get_len_matrix(solv_sizes)
-        
-        label_t = torch.tensor(valid_labels, dtype=torch.float32)
-        
-        return sol_batch, solv_batch, sol_len, solv_len, label_t
-    except Exception as e:
-        print("❌ Collate error:", e)
-        traceback.print_exc()
-        raise e
+# collate_fn inside your dataset/dataloader
+def collate_fn(samples):
+    solute_graphs, solvent_graphs, solute_lens, solvent_lens, labels = map(list, zip(*samples))
+
+    # Batch graphs correctly
+    batched_solute = dgl.batch(solute_graphs)
+    batched_solvent = dgl.batch(solvent_graphs)
+
+    solute_lens = torch.tensor(solute_lens, dtype=torch.float32).unsqueeze(1)
+    solvent_lens = torch.tensor(solvent_lens, dtype=torch.float32).unsqueeze(1)
+
+    labels = torch.tensor(labels, dtype=torch.float32)
+
+    return batched_solute, batched_solvent, solute_lens, solvent_lens, labels
 
 class SafeDataset(Dataset):
     def __init__(self, df):
@@ -170,17 +153,19 @@ class SafeDataset(Dataset):
     
     def __len__(self):
         return len(self.valid_indices)
-    
     def __getitem__(self, idx):
-        try:
-            real_idx = self.valid_indices[idx]
-            row = self.df.iloc[real_idx]
-            sg = get_graph_from_smile(str(row['SoluteSMILES']))
-            vg = get_graph_from_smile(str(row['SolventSMILES']))
-            return sg, vg, float(row['DeltaGsolv'])
-        except Exception as e:
-            print(f"⚠️  Error on __getitem__ idx={idx}: {e}")
-            return None
+        row = self.df.iloc[self.valid_indices[idx]]
+        solute_smiles = row["SoluteSMILES"]
+        solvent_smiles = row["SolventSMILES"]
+        label = float(row["DeltaGsolv"])
+        solute_graph = get_graph_from_smile(solute_smiles)
+        solvent_graph = get_graph_from_smile(solvent_smiles)
+        solute_len = solute_graph.number_of_nodes()
+        solvent_len = solvent_graph.number_of_nodes()
+        
+        return solute_graph, solvent_graph, solute_len, solvent_len, label
+
+
 
 def main():
     print("\n💾 Loading data...")
@@ -189,15 +174,24 @@ def main():
         return
     
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              collate_fn=safe_collate, num_workers=0, pin_memory=False)
+                              collate_fn=collate_fn, num_workers=0, pin_memory=False)
     valid_loader = DataLoader(valid_ds, batch_size=batch_size, shuffle=False,
-                              collate_fn=safe_collate, num_workers=0, pin_memory=False)
+                              collate_fn=collate_fn, num_workers=0, pin_memory=False)
+    print(f"🧮 Estimated training batches: {len(train_loader)}")
+    print(f"🧮 Estimated validation batches: {len(valid_loader)}")
+
     
     print("\n🧠 Initializing model...")
+    print(f"Aggregation method: {'🤖 Transformer' if use_transformer else '📊 Set2Set'}")
+    if use_transformer:
+        print(f"Transformer config: {transformer_heads} heads, {transformer_layers} layers")
+    
     model = CIGINModel(node_input_dim=42, edge_input_dim=10, node_hidden_dim=42,
                        edge_hidden_dim=42, num_step_message_passing=6,
                        interaction=interaction, num_step_set2_set=2,
-                       num_layer_set2set=1)
+                       num_layer_set2set=1, use_transformer=use_transformer,
+                       transformer_heads=transformer_heads, 
+                       transformer_layers=transformer_layers)
     model.to(device)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
@@ -206,6 +200,10 @@ def main():
     print(f"▶️ Starting training: {len(train_ds)} train samples, {len(valid_ds)} valid samples")
     best = train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name)
     print(f"\n🏁 Training finished. Best validation loss: {best:.4f}")
+    if best is None:
+        print("✅ All training epochs completed successfully.")
+
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()  # Especially needed for Windows
     main()

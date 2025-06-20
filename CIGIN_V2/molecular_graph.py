@@ -95,6 +95,7 @@ def get_graph_from_smile(molecule_smile):
     """
     try:
         molecule = Chem.MolFromSmiles(molecule_smile)
+        molecule = Chem.RemoveHs(molecule) 
         if molecule is None:
             raise ValueError(f"Invalid SMILES: {molecule_smile}")
         
@@ -157,14 +158,16 @@ def get_graph_from_smile(molecule_smile):
         
         # Create DGL graph
         if len(src_nodes) > 0:
-            G = dgl.graph((src_nodes, dst_nodes), num_nodes=num_atoms)
-            G.edata['w'] = torch.tensor(np.array(edge_features), dtype=torch.float32)
+            src_tensor = torch.tensor(src_nodes, dtype=torch.int64)
+            dst_tensor = torch.tensor(dst_nodes, dtype=torch.int64)
+            G = dgl.graph((src_tensor, dst_tensor), num_nodes=num_atoms)
+            G.edata['w'] = torch.tensor(np.array(edge_features), dtype=torch.float64)
         else:
             # Handle molecules with no bonds (single atoms)
             G = dgl.graph(([], []), num_nodes=num_atoms)
-            G.edata['w'] = torch.empty((0, 10), dtype=torch.float32)
+            G.edata['w'] = torch.empty((0, 10), dtype=torch.float64)
         
-        G.ndata['x'] = torch.tensor(np.array(node_features), dtype=torch.float32)
+        G.ndata['x'] = torch.tensor(np.array(node_features), dtype=torch.float64)
         
         # Verify dimensions
         assert G.ndata['x'].shape[1] == 42, f"Node features must be 42D, got {G.ndata['x'].shape[1]}"
@@ -177,6 +180,6 @@ def get_graph_from_smile(molecule_smile):
         print(f"Error creating graph from SMILES {molecule_smile}: {e}")
         # Return a minimal graph with correct dimensions
         G = dgl.graph(([], []), num_nodes=1)
-        G.ndata['x'] = torch.zeros((1, 42), dtype=torch.float32)
-        G.edata['w'] = torch.empty((0, 10), dtype=torch.float32)
+        G.ndata['x'] = torch.zeros((1, 42), dtype=torch.float64)
+        G.edata['w'] = torch.empty((0, 10), dtype=torch.float64)
         return G
