@@ -31,5 +31,5 @@ bashpython main.py --name cigin_transformer --interaction dot --max_epochs 100 -
 
 Using Transformer with custom configuration:
 ```python
-bashpython main.py --name cigin_custom --interaction dot --max_epochs 100 --use_transfo
+bashpython main.py --name cigin_custom --interaction dot --max_epochs 100 --use_transformer
 ```
