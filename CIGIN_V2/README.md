@@ -20,7 +20,16 @@ The MNSol dataset provided [here](https://conservancy.umn.edu/handle/11299/21330
 
 ## Running the Code:
 
-To run the code following isntructions can be followed.
+To run the code following isntructions can be followed for set2set.
 ```python
 python main.py --name cigin --interaction dot --batch_size 32
+```
+Using Transformer:
+```python
+bashpython main.py --name cigin_transformer --interaction dot --max_epochs 100 --use_transformer
+```
+
+Using Transformer with custom configuration:
+```python
+bashpython main.py --name cigin_custom --interaction dot --max_epochs 100 --use_transfo
 ```
