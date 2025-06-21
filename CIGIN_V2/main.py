@@ -73,10 +73,10 @@ def load_data():
         valid_csv = os.path.join('data', 'valid.csv')
         
         if not os.path.exists(train_csv):
-            print(f"❌ Error: {train_csv} not found")
+            print(f" Error: {train_csv} not found")
             return None, None
         if not os.path.exists(valid_csv):
-            print(f"⚠️  Warning: {valid_csv} not found—using train.csv for validation")
+            print(f" Warning: {valid_csv} not found—using train.csv for validation")
             train_df = pd.read_csv(train_csv, sep=';')
             valid_df = train_df.copy()
         else:
@@ -85,10 +85,10 @@ def load_data():
         
         for col in ['SoluteSMILES', 'SolventSMILES', 'DeltaGsolv']:
             if col not in train_df:
-                print(f"❌ Error: Column {col} missing in train.csv")
+                print(f"Error: Column {col} missing in train.csv")
                 return None, None
             if col not in valid_df:
-                print(f"❌ Error: Column {col} missing in valid.csv")
+                print(f"Error: Column {col} missing in valid.csv")
                 return None, None
         
         print(f"➡️  Loaded datasets: train {len(train_df)} rows, valid {len(valid_df)} rows")
@@ -97,16 +97,16 @@ def load_data():
         valid_dataset = SafeDataset(valid_df)
         
         if len(train_dataset) == 0:
-            print("❌ Error: No valid training samples found.")
+            print("Error: No valid training samples found.")
             return None, None
         if len(valid_dataset) == 0:
-            print("⚠️  Warning: No valid validation samples found—using training data instead.")
+            print(" Warning: No valid validation samples found—using training data instead.")
             valid_dataset = train_dataset
         
         return train_dataset, valid_dataset
     
     except Exception as e:
-        print("❌ Error loading data:", e)
+        print("Error loading data:", e)
         traceback.print_exc()
         return None, None
 
@@ -177,12 +177,12 @@ def main():
                               collate_fn=collate_fn, num_workers=0, pin_memory=False)
     valid_loader = DataLoader(valid_ds, batch_size=batch_size, shuffle=False,
                               collate_fn=collate_fn, num_workers=0, pin_memory=False)
-    print(f"🧮 Estimated training batches: {len(train_loader)}")
-    print(f"🧮 Estimated validation batches: {len(valid_loader)}")
+    print(f"Estimated training batches: {len(train_loader)}")
+    print(f"Estimated validation batches: {len(valid_loader)}")
 
     
     print("\n🧠 Initializing model...")
-    print(f"Aggregation method: {'🤖 Transformer' if use_transformer else '📊 Set2Set'}")
+    print(f"Aggregation method: {'Transformer' if use_transformer else ' Set2Set'}")
     if use_transformer:
         print(f"Transformer config: {transformer_heads} heads, {transformer_layers} layers")
     
@@ -197,13 +197,13 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
     
-    print(f"▶️ Starting training: {len(train_ds)} train samples, {len(valid_ds)} valid samples")
+    print(f"Starting training: {len(train_ds)} train samples, {len(valid_ds)} valid samples")
     best = train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name)
-    print(f"\n🏁 Training finished. Best validation loss: {best:.4f}")
+    print(f"\nTraining finished. Best validation loss: {best:.4f}")
     if best is None:
-        print("✅ All training epochs completed successfully.")
+        print("All training epochs completed successfully.")
 
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()  # Especially needed for Windows
+    multiprocessing.freeze_support()  
     main()
