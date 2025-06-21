@@ -1,0 +1,38 @@
+# Core Libraries
+torch>=1.12.0
+torchvision
+dgl>=0.9.1
+numpy
+pandas
+scikit-learn
+matplotlib
+tqdm
+
+# Optional/Utilities
+seaborn
+rdkit-pypi
+notebook
+ipython
+jupyterlab
+
+# If using CUDA (remove/comment if using CPU-only)
+# For CUDA 11.3
+# torch==1.12.0+cu113
+# dgl-cu113==0.9.1
+
+# For CUDA 11.8
+# torch==1.13.1+cu118
+# dgl-cu118==0.9.1
+
+# refer the dgl installation document for better installation as required by your system
+# Uncomment one of the following based on DGL type you want:
+# dgl-cu102  # CUDA 10.2
+# dgl-cu113  # CUDA 11.3
+# dgl-cu116  # CUDA 11.6
+# dgl-cu118  # CUDA 11.8
+# or just:
+# dgl        # for CPU version
+
+# *Important* if you got error in importing dgl please do this steps given below
+# setp 1: go to:<your_env>/Lib/site-packages/dgl/graphbolt/__init__.py
+# step 2: Comment out or remove the load_graphbolt() call: # load_graphbolt()
