@@ -149,8 +149,7 @@ def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, p
             try:
                 optimizer.zero_grad()
                 validated_data = validate_batch_data(batch_data)
-                if validated_data is None:
-                    continue
+                
                 solute_graphs, solvent_graphs, solute_lens, solvent_lens, labels = validated_data
                 solute_graphs = solute_graphs.to(device)
                 solvent_graphs = solvent_graphs.to(device)
