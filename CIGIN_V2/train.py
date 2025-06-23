@@ -173,8 +173,8 @@ def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, p
                     continue
 
                 main_loss = loss_fn(outputs, labels)
-                l2_reg = torch.norm(interaction_map, p=2) * 1e-4 if interaction_map.numel() > 0 else torch.tensor(0.0, device=device)
-                total_loss = main_loss + l2_reg
+                l1_norm = torch.norm(interaction_map, p=2) * 1e-4
+                total_loss = main_loss + l1_norm
 
                 if not torch.isfinite(total_loss):
                     print(f" Non-finite total loss at batch {batch_idx+1}, skipping")
