@@ -78,3 +78,17 @@ class SolvationTrainer:
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                 }, 'best_model.pth')
+
+# Wrapper functions required by main.py
+def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name):
+    """Wrapper function to match main.py interface"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    trainer = SolvationTrainer(device=device)
+    trainer.train(model, optimizer, scheduler, train_loader, valid_loader, epochs=max_epochs)
+
+def get_metrics(model, data_loader):
+    """Calculate MSE and MAE metrics"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    trainer = SolvationTrainer(device=device)
+    val_loss, val_mae = trainer.validate(model, data_loader)
+    return val_loss, val_mae
