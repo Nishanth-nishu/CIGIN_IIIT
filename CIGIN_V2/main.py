@@ -33,17 +33,23 @@ warnings.filterwarnings("ignore")
 
 # Argument parsing
 parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='cigin', help="The name of the current project: default: CIGIN")
+parser.add_argument('--name', default='cigin_transformer', help="The name of the current project: default: CIGIN_Transformer")
 parser.add_argument('--interaction', help="type of interaction function to use: dot | scaled-dot | general | tanh-general", 
                     default='dot')
 parser.add_argument('--max_epochs', required=False, default=100, help="The max number of epochs for training")
 parser.add_argument('--batch_size', required=False, default=32, help="The batch size for training")
+parser.add_argument('--num_transformer_layers', required=False, default=6, help="Number of transformer layers")
+parser.add_argument('--num_heads', required=False, default=4, help="Number of attention heads")
+parser.add_argument('--dropout', required=False, default=0.1, help="Dropout rate")
 
 args = parser.parse_args()
 project_name = args.name
 interaction = args.interaction
 max_epochs = int(args.max_epochs)
 batch_size = int(args.batch_size)
+num_transformer_layers = int(args.num_transformer_layers)
+num_heads = int(args.num_heads)
+dropout = float(args.dropout)
 
 # Device configuration
 use_cuda = torch.cuda.is_available()
@@ -55,7 +61,7 @@ if not os.path.isdir("runs/run-" + str(project_name)):
     os.makedirs("./runs/run-" + str(project_name) + "/models")
 
 def collate(samples):
-    """Batch preparation function"""
+    """Batch preparation function - unchanged from original"""
     solute_graphs, solvent_graphs, labels = map(list, zip(*samples))
     solute_graphs = dgl.batch(solute_graphs)
     solvent_graphs = dgl.batch(solvent_graphs)
@@ -64,7 +70,7 @@ def collate(samples):
     return solute_graphs, solvent_graphs, solute_len_matrix, solvent_len_matrix, labels
 
 class Dataclass(Dataset):
-    """Custom dataset class"""
+    """Custom dataset class - unchanged from original"""
     def __init__(self, dataset):
         self.dataset = dataset
 
@@ -88,7 +94,7 @@ class Dataclass(Dataset):
         return [solute_graph, solvent_graph, [delta_g]]
 
 def main():
-    # Data loading and splitting
+    # Data loading and splitting - unchanged from original
     df = pd.read_csv('https://raw.githubusercontent.com/adithyamauryakr/CIGIN-DevaLab/refs/heads/master/CIGIN_V2/data/whole_data.csv')
     df.columns = df.columns.str.strip()
     
@@ -106,18 +112,26 @@ def main():
     valid_loader = DataLoader(valid_dataset, collate_fn=collate, batch_size=128)
     test_loader = DataLoader(test_dataset, collate_fn=collate, batch_size=128)
 
-    # Initialize model (only Set2Set version)
-    model = CIGINModel(interaction=interaction)
+    # Initialize model with Graph Transformer
+    model = CIGINModel(
+        interaction=interaction,
+        num_transformer_layers=num_transformer_layers,
+        num_heads=num_heads,
+        dropout=dropout
+    )
     model.to(device)
     
-    # Training setup
+    print(f"Model initialized with {sum(p.numel() for p in model.parameters())} parameters")
+    print(f"Using Graph Transformer with {num_transformer_layers} layers and {num_heads} heads")
+    
+    # Training setup - unchanged from original
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     scheduler = ReduceLROnPlateau(optimizer, patience=5, mode='min', verbose=True)
 
-    # Training loop
+    # Training loop - unchanged from original
     train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name)
 
-    # Final evaluation on test set
+    # Final evaluation on test set - unchanged from original
     model.eval()
     loss, mae_loss = get_metrics(model, test_loader)
     print(f"\nFinal test set performance:")
