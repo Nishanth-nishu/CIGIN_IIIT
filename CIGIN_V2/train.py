@@ -1,7 +1,6 @@
 from tqdm import tqdm
 import torch
 import numpy as np
-import torch.nn.functional as F
 
 class SolvationTrainer:
     def __init__(self, device='cuda'):
