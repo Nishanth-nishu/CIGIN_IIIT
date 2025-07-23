@@ -39,7 +39,7 @@ parser.add_argument('--interaction', help="type of interaction function to use: 
 parser.add_argument('--max_epochs', required=False, default=100, help="The max number of epochs for training")
 parser.add_argument('--batch_size', required=False, default=32, help="The batch size for training")
 parser.add_argument('--num_transformer_layers', required=False, default=6, help="Number of transformer layers")
-parser.add_argument('--num_heads', required=False, default=4, help="Number of attention heads")
+parser.add_argument('--num_heads', required=False, default=6, help="Number of attention heads (must be divisible with hidden_dim=42)")
 parser.add_argument('--dropout', required=False, default=0.1, help="Dropout rate")
 
 args = parser.parse_args()
