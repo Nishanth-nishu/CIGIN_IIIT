@@ -3,41 +3,73 @@ import torch.nn as nn
 import torch.nn.functional as F
 import dgl
 import dgl.function as fn
-from dgl.nn import GraphTransformerLayer
+from dgl.nn.pytorch import Set2Set
 from math import sqrt
 
-class GraphTransformerGather(nn.Module):
-    def __init__(self, node_dim=42, edge_dim=10, num_heads=4, num_layers=3):
+class GraphTransformerLayer(nn.Module):
+    """Custom Graph Transformer Layer compatible with all DGL versions"""
+    def __init__(self, node_dim=42, num_heads=4, dropout=0.1):
         super().__init__()
         self.node_dim = node_dim
-        self.edge_proj = nn.Linear(edge_dim, num_heads)
+        self.num_heads = num_heads
+        self.head_dim = node_dim // num_heads
         
-        # Graph Transformer layers with residual connections
+        # Projections
+        self.q_proj = nn.Linear(node_dim, node_dim)
+        self.k_proj = nn.Linear(node_dim, node_dim)
+        self.v_proj = nn.Linear(node_dim, node_dim)
+        self.out_proj = nn.Linear(node_dim, node_dim)
+        
+        # Edge feature handling
+        self.edge_proj = nn.Linear(10, num_heads)  # edge_dim=10
+        
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(node_dim)
+        
+    def forward(self, g, h, e_feat=None):
+        # Projections
+        q = self.q_proj(h).view(-1, self.num_heads, self.head_dim)
+        k = self.k_proj(h).view(-1, self.num_heads, self.head_dim)
+        v = self.v_proj(h).view(-1, self.num_heads, self.head_dim)
+        
+        # Attention scores
+        attn_scores = torch.einsum('nhd,mhd->nhm', q, k) / sqrt(self.head_dim)
+        
+        # Add edge-based attention biases
+        if e_feat is not None:
+            edge_bias = self.edge_proj(e_feat).permute(1,0)  # [num_heads, E]
+            g.edata['b'] = edge_bias
+            g.update_all(fn.copy_e('b', 'm'), fn.sum('m', 'b_sum'))
+            attn_scores = attn_scores + g.ndata['b_sum'].permute(1,0,2)  # [N, N, H]
+        
+        # Masking based on adjacency
+        adj = g.adjacency_matrix().to_dense().bool()
+        attn_scores = attn_scores.masked_fill(~adj.unsqueeze(-1), float('-inf'))
+        
+        # Attention weights
+        attn_weights = F.softmax(attn_scores, dim=1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Output
+        out = torch.einsum('nhm,mhd->nhd', attn_weights, v)
+        out = out.reshape(-1, self.node_dim)
+        out = self.out_proj(out)
+        
+        # Residual + norm
+        return self.norm(h + self.dropout(out))
+
+class GraphTransformerGather(nn.Module):
+    def __init__(self, node_dim=42, edge_dim=10, num_layers=3):
+        super().__init__()
         self.layers = nn.ModuleList([
-            GraphTransformerLayer(
-                in_size=node_dim,
-                out_size=node_dim,
-                num_heads=num_heads,
-                dropout=0.1,
-                norm_first=True
-            ) for _ in range(num_layers)
+            GraphTransformerLayer(node_dim) 
+            for _ in range(num_layers)
         ])
         
-        self.norms = nn.ModuleList([nn.LayerNorm(node_dim) for _ in range(num_layers)])
-        
-    def forward(self, g, node_feats, edge_feats=None):
-        # Compute attention biases from edge features
-        attn_bias = torch.zeros(g.num_nodes(), g.num_nodes(), device=node_feats.device)
-        if edge_feats is not None:
-            edge_bias = self.edge_proj(edge_feats)  # [E, num_heads]
-            g.edata['a'] = edge_bias
-            g.update_all(fn.copy_e('a', 'm'), fn.sum('m', 'a_sum'))
-            attn_bias = g.ndata['a_sum'].permute(1, 0)  # [N, N, H]
-        
-        # Transformer processing
-        h = node_feats
-        for layer, norm in zip(self.layers, self.norms):
-            h = norm(h + layer(g, h, attn_bias=attn_bias))
+    def forward(self, g, n_feat, e_feat=None):
+        h = n_feat
+        for layer in self.layers:
+            h = layer(g, h, e_feat)
         return h
 
 class CIGINModel(nn.Module):
@@ -46,8 +78,8 @@ class CIGINModel(nn.Module):
         self.interaction = interaction
         
         # Graph Transformer encoders
-        self.solute_encoder = GraphTransformerGather(node_dim=42, edge_dim=10)
-        self.solvent_encoder = GraphTransformerGather(node_dim=42, edge_dim=10)
+        self.solute_encoder = GraphTransformerGather(node_dim=42)
+        self.solvent_encoder = GraphTransformerGather(node_dim=42)
         
         # Prediction layers
         self.fc1 = nn.Linear(8 * 42, 256)
@@ -55,7 +87,7 @@ class CIGINModel(nn.Module):
         self.fc3 = nn.Linear(128, 1)
         self.imap = nn.Linear(80, 1)
         
-    def forward(self, data, return_attention=False):
+    def forward(self, data):
         solute, solvent, solute_len, solvent_len = data
         
         # Get Transformer features
@@ -94,7 +126,4 @@ class CIGINModel(nn.Module):
         out = F.relu(self.fc2(out))
         out = self.fc3(out)
         
-        if return_attention:
-            # For attention visualization (requires modification to GraphTransformerLayer)
-            return out, interaction_map, None  # Replace with actual attention weights
         return out, interaction_map
