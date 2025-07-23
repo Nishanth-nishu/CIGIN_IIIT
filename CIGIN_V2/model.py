@@ -109,7 +109,7 @@ class CIGINTransformer(nn.Module):
         
         if 'dot' in self.interaction:
             interaction_map = torch.tanh(
-                torch.mm(solute_feats, solvent_feats.t()) / (42 ** 0.5)
+                torch.mm(solute_feats, solvent_feats.t()) / (42 ** 0.5))
             interaction_map = torch.mul(len_map.float(), interaction_map)
         
         # Cross-message passing
