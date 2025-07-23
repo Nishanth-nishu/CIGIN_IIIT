@@ -8,13 +8,25 @@ mae_loss_fn = torch.nn.L1Loss()
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
 
+def evaluate_model(model, dataloader):
+    model.eval()
+    preds, targets = [], []
+    with torch.no_grad():
+        for samples in dataloader:
+            outputs, _ = model([samples[0].to(device), samples[1].to(device),
+                                samples[2].to(device), samples[3].to(device)])
+            preds.extend(outputs.cpu().numpy())
+            targets.extend(samples[4].numpy())
+    preds, targets = np.array(preds), np.array(targets)
+    rmse = np.sqrt(np.mean((preds - targets) ** 2))
+    return rmse
 
 def get_metrics(model, data_loader):
     valid_outputs = []
     valid_labels = []
     valid_loss = []
     valid_mae_loss = []
-    for solute_graphs, solvent_graphs, solute_lens, solvent_lens, labels in tqdm(data_loader):
+    for solute_graphs, solvent_graphs, solute_lens, solvent_lens, labels in data_loader:
         outputs, i_map = model(
             [solute_graphs.to(device), solvent_graphs.to(device), torch.tensor(solute_lens).to(device),
              torch.tensor(solvent_lens).to(device)])
@@ -58,3 +70,4 @@ def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, p
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), "./runs/run-" + str(project_name) + "/models/best_model.tar")
+

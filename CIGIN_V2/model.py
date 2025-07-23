@@ -108,7 +108,7 @@ class CIGINModel(nn.Module):
                                           self.node_hidden_dim, self.edge_input_dim,
                                           self.num_step_message_passing,
                                           )
-
+        # These three are the FFNN for prediction phase
         self.fc1 = nn.Linear(8 * self.node_hidden_dim, 256)
         self.fc2 = nn.Linear(256, 128)
         self.fc3 = nn.Linear(128, 1)
@@ -126,13 +126,12 @@ class CIGINModel(nn.Module):
         solvent_len = data[3]
         # node embeddings after interaction phase
         solute_features = self.solute_gather(solute, solute.ndata['x'].float(), solute.edata['w'].float())
+        # In CIGINModel.forward(), modify the solvent features part:
         try:
-            # if edge exists in a molecule
-            solvent_features = self.solvent_gather(solvent, solvent.ndata['x'].float(), solvent.edata['w'].float())
+            solvent_features = self.solvent_gather(solvent, solvent.ndata['x'].float(), 
+                                         solvent.edata['w'].float() if 'w' in solvent.edata else None)
         except:
-            # if edge doesn't exist in a molecule, for example in case of water
             solvent_features = self.solvent_gather(solvent, solvent.ndata['x'].float(), None)
-
         # Interaction phase
         len_map = torch.mm(solute_len.t(), solvent_len)
 
