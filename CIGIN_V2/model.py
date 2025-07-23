@@ -3,8 +3,116 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import dgl
-from dgl.nn.pytorch import GraphTransformerLayer
 import math
+
+class MultiHeadAttention(nn.Module):
+    """Custom Multi-Head Attention for Graph Transformer"""
+    def __init__(self, d_model, num_heads, dropout=0.1):
+        super(MultiHeadAttention, self).__init__()
+        assert d_model % num_heads == 0
+        
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
+        self.w_o = nn.Linear(d_model, d_model)
+        
+        self.dropout = nn.Dropout(dropout)
+        
+    def scaled_dot_product_attention(self, q, k, v, mask=None):
+        """Compute scaled dot product attention"""
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
+        
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e9)
+            
+        attention_weights = F.softmax(scores, dim=-1)
+        attention_weights = self.dropout(attention_weights)
+        
+        output = torch.matmul(attention_weights, v)
+        return output, attention_weights
+    
+    def forward(self, query, key, value, mask=None):
+        batch_size = query.size(0)
+        
+        # Linear transformations
+        q = self.w_q(query).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        k = self.w_k(key).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        v = self.w_v(value).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        
+        # Apply attention
+        attn_output, attn_weights = self.scaled_dot_product_attention(q, k, v, mask)
+        
+        # Concatenate heads
+        attn_output = attn_output.transpose(1, 2).contiguous().view(
+            batch_size, -1, self.d_model)
+        
+        # Final linear transformation
+        output = self.w_o(attn_output)
+        return output
+
+class GraphTransformerLayer(nn.Module):
+    """Custom Graph Transformer Layer compatible with older DGL versions"""
+    def __init__(self, d_model, num_heads, d_ff=None, dropout=0.1):
+        super(GraphTransformerLayer, self).__init__()
+        
+        if d_ff is None:
+            d_ff = 4 * d_model
+            
+        self.self_attention = MultiHeadAttention(d_model, num_heads, dropout)
+        self.feed_forward = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, d_model),
+            nn.Dropout(dropout)
+        )
+        
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, g, h, e=None):
+        """
+        Forward pass for graph transformer layer
+        
+        Parameters:
+        -----------
+        g : DGLGraph
+            Input graph
+        h : torch.Tensor
+            Node features [num_nodes, d_model]
+        e : torch.Tensor, optional
+            Edge features (not used in this simple implementation)
+            
+        Returns:
+        --------
+        torch.Tensor
+            Updated node features [num_nodes, d_model]
+        """
+        # Create adjacency-based attention mask
+        num_nodes = h.size(0)
+        adj_matrix = g.adjacency_matrix().to_dense().float()
+        
+        # Add self-loops for attention
+        adj_matrix = adj_matrix + torch.eye(num_nodes, device=h.device)
+        
+        # Expand for batch processing (treating each node as a "batch")
+        h_batch = h.unsqueeze(0)  # [1, num_nodes, d_model]
+        mask = adj_matrix.unsqueeze(0)  # [1, num_nodes, num_nodes]
+        
+        # Self-attention with residual connection
+        attn_output = self.self_attention(h_batch, h_batch, h_batch, mask)
+        h = self.norm1(h + self.dropout(attn_output.squeeze(0)))
+        
+        # Feed-forward with residual connection
+        ff_output = self.feed_forward(h)
+        h = self.norm2(h + ff_output)
+        
+        return h
 
 class GraphTransformerEncoder(nn.Module):
     """
@@ -34,14 +142,10 @@ class GraphTransformerEncoder(nn.Module):
         # Graph Transformer layers
         self.transformer_layers = nn.ModuleList([
             GraphTransformerLayer(
-                in_feat=node_hidden_dim,
-                out_feat=node_hidden_dim,
+                d_model=node_hidden_dim,
                 num_heads=num_heads,
-                dropout=dropout,
-                layer_norm=True,
-                batch_norm=False,
-                residual=True,
-                use_bias=True
+                d_ff=4 * node_hidden_dim,
+                dropout=dropout
             ) for _ in range(num_layers)
         ])
         
@@ -69,15 +173,9 @@ class GraphTransformerEncoder(nn.Module):
         # Project input features
         h = self.node_projection(node_feat)
         
-        # Handle edge features if available
-        if self.use_edge_features and edge_feat is not None:
-            e = self.edge_projection(edge_feat)
-        else:
-            e = None
-            
         # Apply transformer layers
         for layer in self.transformer_layers:
-            h = layer(g, h, e)
+            h = layer(g, h, edge_feat)
             
         # Final layer normalization
         h = self.layer_norm(h)
@@ -99,17 +197,7 @@ class GraphTransformerPooling(nn.Module):
         self.hidden_dim = hidden_dim
         
         # Attention mechanism for pooling
-        self.attention = nn.MultiheadAttention(
-            embed_dim=node_dim,
-            num_heads=4,
-            dropout=0.1,
-            batch_first=False
-        )
-        
-        # Learnable query vector for pooling
-        self.query = nn.Parameter(torch.randn(1, node_dim))
-        
-        # Output projection
+        self.attention_weights = nn.Linear(node_dim, 1)
         self.output_proj = nn.Linear(node_dim, hidden_dim)
         
     def forward(self, g, node_embeddings):
@@ -144,19 +232,15 @@ class GraphTransformerPooling(nn.Module):
             end_idx = start_idx + num_nodes
             graph_nodes = node_embeddings[start_idx:end_idx]  # [num_nodes, node_dim]
             
-            # Prepare for attention: [seq_len, batch, embed_dim]
-            nodes_for_attention = graph_nodes.unsqueeze(1).transpose(0, 1)  # [num_nodes, 1, node_dim]
-            query_for_attention = self.query.unsqueeze(1)  # [1, 1, node_dim]
+            # Compute attention weights
+            attention_scores = self.attention_weights(graph_nodes)  # [num_nodes, 1]
+            attention_weights = F.softmax(attention_scores, dim=0)  # [num_nodes, 1]
             
-            # Apply attention pooling
-            pooled, _ = self.attention(
-                query_for_attention,
-                nodes_for_attention,
-                nodes_for_attention
-            )
+            # Weighted sum of node features
+            pooled = torch.sum(attention_weights * graph_nodes, dim=0, keepdim=True)  # [1, node_dim]
             
             # Project to output dimension
-            pooled = self.output_proj(pooled.squeeze(1))  # [1, hidden_dim]
+            pooled = self.output_proj(pooled)  # [1, hidden_dim]
             graph_embeddings.append(pooled)
             
             start_idx = end_idx
