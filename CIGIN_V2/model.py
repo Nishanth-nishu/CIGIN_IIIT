@@ -9,9 +9,13 @@ class MultiHeadAttention(nn.Module):
     """Custom Multi-Head Attention for Graph Transformer"""
     def __init__(self, d_model, num_heads, dropout=0.1):
         super(MultiHeadAttention, self).__init__()
-        assert d_model % num_heads == 0
+        # Ensure d_model is divisible by num_heads
+        if d_model % num_heads != 0:
+            # Adjust d_model to be divisible by num_heads
+            d_model = ((d_model // num_heads) + 1) * num_heads
         
         self.d_model = d_model
+        self.original_d_model = d_model
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
         
@@ -59,6 +63,16 @@ class GraphTransformerLayer(nn.Module):
     def __init__(self, d_model, num_heads, d_ff=None, dropout=0.1):
         super(GraphTransformerLayer, self).__init__()
         
+        # Ensure d_model is compatible with num_heads
+        if d_model % num_heads != 0:
+            adjusted_d_model = ((d_model // num_heads) + 1) * num_heads
+            self.input_projection = nn.Linear(d_model, adjusted_d_model)
+            self.output_projection = nn.Linear(adjusted_d_model, d_model)
+            d_model = adjusted_d_model
+        else:
+            self.input_projection = None
+            self.output_projection = None
+            
         if d_ff is None:
             d_ff = 4 * d_model
             
@@ -91,8 +105,14 @@ class GraphTransformerLayer(nn.Module):
         Returns:
         --------
         torch.Tensor
-            Updated node features [num_nodes, d_model]
+            Updated node features [num_nodes, original_d_model]
         """
+        original_h = h
+        
+        # Project to compatible dimensions if needed
+        if self.input_projection is not None:
+            h = self.input_projection(h)
+        
         # Create adjacency-based attention mask
         num_nodes = h.size(0)
         adj_matrix = g.adjacency_matrix().to_dense().float()
@@ -111,6 +131,10 @@ class GraphTransformerLayer(nn.Module):
         # Feed-forward with residual connection
         ff_output = self.feed_forward(h)
         h = self.norm2(h + ff_output)
+        
+        # Project back to original dimensions if needed
+        if self.output_projection is not None:
+            h = self.output_projection(h)
         
         return h
 
