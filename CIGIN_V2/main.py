@@ -41,7 +41,8 @@ parser.add_argument('--max_epochs', required=False, default=100, help="The max n
 parser.add_argument('--batch_size', required=False, default=32, help="The batch size for training")
 parser.add_argument('--model_type', required=False, default='both', choices=['original', 'transformer', 'both'],
                     help="Which model to train: original, transformer, or both")
-parser.add_argument('--num_heads', required=False, default=8, help="Number of attention heads for transformer")
+parser.add_argument('--num_heads', required=False, default=6, help="Number of attention heads for transformer (use 6 for 42-dim)")
+parser.add_argument('--hidden_dim', required=False, default=48, help="Hidden dimension (should be divisible by num_heads)")
 
 args = parser.parse_args()
 project_name = args.name
@@ -50,6 +51,13 @@ max_epochs = int(args.max_epochs)
 batch_size = int(args.batch_size)
 model_type = args.model_type
 num_heads = int(args.num_heads)
+hidden_dim = int(args.hidden_dim)
+
+# Ensure hidden_dim is divisible by num_heads
+if hidden_dim % num_heads != 0:
+    # Adjust hidden_dim to be divisible by num_heads
+    hidden_dim = ((hidden_dim // num_heads) + 1) * num_heads
+    print(f"Adjusted hidden_dim to {hidden_dim} to be divisible by {num_heads} heads")
 
 # Device configuration
 use_cuda = torch.cuda.is_available()
@@ -168,15 +176,19 @@ def main():
     # Train models based on user choice
     if model_type in ['original', 'both']:
         print("\nInitializing Original CIGIN Model (Set2Set + Message Passing)...")
-        original_model = CIGINModel(interaction=interaction)
+        original_model = CIGINModel(
+            interaction=interaction,
+            node_hidden_dim=42  # Keep original dimension
+        )
         results.append(train_and_evaluate_model(
             original_model, "Original_CIGIN", train_loader, valid_loader, test_loader, max_epochs
         ))
     
     if model_type in ['transformer', 'both']:
-        print(f"\nInitializing Graph Transformer CIGIN Model (num_heads={num_heads})...")
+        print(f"\nInitializing Graph Transformer CIGIN Model (hidden_dim={hidden_dim}, num_heads={num_heads})...")
         transformer_model = CIGINGraphTransformerModel(
             interaction=interaction,
+            node_hidden_dim=hidden_dim,  # Use adjusted dimension
             num_heads=num_heads
         )
         results.append(train_and_evaluate_model(
