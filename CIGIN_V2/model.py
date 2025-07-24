@@ -217,6 +217,8 @@ class CIGINModel(nn.Module):
         self.imap = nn.Linear(80, 1)
         self.set2set_solute = Set2Set(2 * node_hidden_dim, num_step_set2_set, num_layer_set2set)
         self.set2set_solvent = Set2Set(2 * node_hidden_dim, num_step_set2_set, num_layer_set2set)
+        self.interaction = interaction
+
 
     def forward(self, data):
         solute = data[0]
