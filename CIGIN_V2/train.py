@@ -2,67 +2,60 @@ import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from dgl import DGLGraph
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-import torch.cuda.amp as amp
 
 # Device configuration
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
 
-# Add this function to your existing train.py (keep everything else the same)
+# Loss functions
+loss_fn = torch.nn.MSELoss()
+mae_loss_fn = torch.nn.L1Loss()
+
 def evaluate_model(model, dataloader):
+    """Evaluation function for compatibility with original code"""
     model.eval()
     preds = []
     targets = []
     with torch.no_grad():
         for solute_graphs, solvent_graphs, solute_lens, solvent_lens, labels in dataloader:
+            # Convert inputs to tensors if they aren't already
+            if not isinstance(solute_lens, torch.Tensor):
+                solute_lens = torch.FloatTensor(solute_lens)
+            if not isinstance(solvent_lens, torch.Tensor):
+                solvent_lens = torch.FloatTensor(solvent_lens)
+            if not isinstance(labels, torch.Tensor):
+                labels = torch.FloatTensor(labels)
+                
             outputs, _ = model([
                 solute_graphs.to(device),
                 solvent_graphs.to(device),
                 solute_lens.to(device),
                 solvent_lens.to(device)
             ])
-            preds.extend(outputs.cpu().numpy())
-            targets.extend(labels)
+            preds.extend(outputs.cpu().numpy().flatten())
+            targets.extend(labels.cpu().numpy().flatten())
     return np.sqrt(np.mean((np.array(preds) - np.array(targets))**2))
 
-class MultiTaskLossWrapper(nn.Module):
-    """Adaptive loss weighting for multi-task learning"""
-    def __init__(self, task_num=3):
-        super().__init__()
-        self.task_num = task_num
-        self.log_vars = nn.Parameter(torch.zeros(task_num))
-        self.mse = nn.MSELoss()
-        self.mae = nn.L1Loss()
-
-    def forward(self, preds, targets):
-        # Main task loss (ΔG prediction)
-        mse_loss = self.mse(preds[0], targets[0])
-        mae_loss = self.mae(preds[0], targets[0])
-        
-        # Auxiliary task losses (logP, TPSA, QED)
-        aux_loss = 0
-        if len(targets) > 1 and targets[1] is not None:
-            for i in range(self.task_num):
-                aux_loss += torch.exp(-self.log_vars[i]) * self.mse(preds[1][:,i], targets[1][:,i]) + self.log_vars[i]
-        
-        return {
-            'total': mse_loss + 0.3 * aux_loss,  # Weighted sum
-            'mse': mse_loss,
-            'mae': mae_loss,
-            'aux': aux_loss
-        }
-
-def get_metrics(model, data_loader, return_preds=False):
-    """Enhanced evaluation with optional prediction returns"""
+def get_metrics(model, data_loader):
+    """Calculate MSE and MAE losses"""
     model.eval()
-    total_loss = {'mse': 0, 'mae': 0, 'aux': 0}
-    all_preds = []
-    all_labels = []
+    valid_loss = []
+    valid_mae_loss = []
+    valid_outputs = []
+    valid_labels = []
     
     with torch.no_grad():
         for solute_graphs, solvent_graphs, solute_lens, solvent_lens, labels in data_loader:
+            # Ensure all inputs are tensors
+            if not isinstance(solute_lens, torch.Tensor):
+                solute_lens = torch.FloatTensor(solute_lens)
+            if not isinstance(solvent_lens, torch.Tensor):
+                solvent_lens = torch.FloatTensor(solvent_lens)
+            if not isinstance(labels, torch.Tensor):
+                labels = torch.FloatTensor(labels)
+                
+            # Move data to device
             inputs = [
                 solute_graphs.to(device),
                 solvent_graphs.to(device),
@@ -72,129 +65,91 @@ def get_metrics(model, data_loader, return_preds=False):
             labels = labels.to(device)
             
             # Forward pass
-            with amp.autocast(enabled=use_cuda):
-                main_pred, aux_pred, _ = model(inputs)
-                loss_fn = MultiTaskLossWrapper()
-                losses = loss_fn((main_pred, aux_pred), (labels, None))
+            outputs, _ = model(inputs)
             
-            # Accumulate metrics
-            for k in total_loss:
-                total_loss[k] += losses[k].item() * len(labels)
+            # Calculate losses
+            loss = loss_fn(outputs, labels)
+            mae_loss = mae_loss_fn(outputs, labels)
             
-            if return_preds:
-                all_preds.extend(main_pred.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
+            # Store results
+            valid_loss.append(loss.cpu().item())
+            valid_mae_loss.append(mae_loss.cpu().item())
+            valid_outputs.extend(outputs.cpu().numpy().flatten())
+            valid_labels.extend(labels.cpu().numpy().flatten())
     
-    # Calculate averages
-    num_samples = len(data_loader.dataset)
-    metrics = {k: v / num_samples for k, v in total_loss.items()}
-    
-    if return_preds:
-        return metrics, (np.array(all_preds), np.array(all_labels))
-    return metrics
+    # Calculate mean losses
+    loss = np.mean(valid_loss)
+    mae_loss = np.mean(valid_mae_loss)
+    return loss, mae_loss
 
 def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name):
-    """Enhanced training loop with multiple improvements"""
+    """Main training loop"""
     best_val_loss = float('inf')
-    loss_fn = MultiTaskLossWrapper()
-    scaler = amp.GradScaler(enabled=use_cuda)
-    
-    # Training statistics
-    history = {
-        'train_loss': [],
-        'val_loss': [],
-        'val_mae': [],
-        'lr': []
-    }
     
     for epoch in range(max_epochs):
         model.train()
-        running_loss = {'mse': 0, 'mae': 0, 'aux': 0}
-        total_samples = 0
+        running_loss = []
         
-        # Gradient accumulation
-        accum_steps = 4
-        optimizer.zero_grad()
+        # Initialize progress bar
+        tq_loader = tqdm(train_loader, desc=f"Epoch {epoch+1}/{max_epochs}")
         
-        with tqdm(train_loader, unit="batch") as tepoch:
-            for i, samples in enumerate(tepoch):
-                inputs = [
-                    samples[0].to(device),
-                    samples[1].to(device),
-                    samples[2].to(device),
-                    samples[3].to(device)
-                ]
-                labels = samples[4].to(device)
-                batch_size = labels.shape[0]
-                total_samples += batch_size
-                
-                # Mixed precision forward
-                with amp.autocast(enabled=use_cuda):
-                    main_pred, aux_pred, i_map = model(inputs)
-                    l1_norm = torch.norm(i_map, p=2) * 1e-4
-                    losses = loss_fn((main_pred, aux_pred), (labels, None))
-                    loss = losses['total'] / accum_steps + l1_norm
-                
-                # Backward pass
-                scaler.scale(loss).backward()
-                
-                # Gradient accumulation update
-                if (i + 1) % accum_steps == 0 or (i + 1) == len(train_loader):
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
-                
-                # Update running losses
-                for k in running_loss:
-                    running_loss[k] += losses[k].item() * batch_size
-                
-                # Progress bar update
-                tepoch.set_postfix({
-                    'loss': f"{running_loss['mse']/total_samples:.4f}",
-                    'mae': f"{running_loss['mae']/total_samples:.4f}"
-                })
+        for samples in tq_loader:
+            optimizer.zero_grad()
+            
+            # Convert and move data to device
+            solute_graphs = samples[0].to(device)
+            solvent_graphs = samples[1].to(device)
+            
+            # Handle length matrices
+            solute_lens = samples[2]
+            solvent_lens = samples[3]
+            if not isinstance(solute_lens, torch.Tensor):
+                solute_lens = torch.FloatTensor(solute_lens)
+            if not isinstance(solvent_lens, torch.Tensor):
+                solvent_lens = torch.FloatTensor(solvent_lens)
+            solute_lens = solute_lens.to(device)
+            solvent_lens = solvent_lens.to(device)
+            
+            # Handle labels
+            labels = samples[4]
+            if not isinstance(labels, torch.Tensor):
+                labels = torch.FloatTensor(labels)
+            labels = labels.to(device)
+            
+            # Forward pass
+            outputs, interaction_map = model([solute_graphs, solvent_graphs, solute_lens, solvent_lens])
+            
+            # Calculate loss with L1 regularization
+            l1_norm = torch.norm(interaction_map, p=2) * 1e-4
+            loss = loss_fn(outputs, labels) + l1_norm
+            
+            # Backward pass
+            loss.backward()
+            optimizer.step()
+            
+            # Update running loss (without regularization term)
+            running_loss.append((loss - l1_norm).cpu().item())
+            
+            # Update progress bar
+            tq_loader.set_postfix(loss=np.mean(running_loss))
         
-        # Calculate epoch metrics
-        train_metrics = {k: v/total_samples for k, v in running_loss.items()}
-        val_metrics = get_metrics(model, valid_loader)
-        
-        # Update scheduler
-        scheduler.step(val_metrics['mse'])
-        
-        # Store history
-        history['train_loss'].append(train_metrics['mse'])
-        history['val_loss'].append(val_metrics['mse'])
-        history['val_mae'].append(val_metrics['mae'])
-        history['lr'].append(optimizer.param_groups[0]['lr'])
+        # Validation phase
+        val_loss, mae_loss = get_metrics(model, valid_loader)
+        scheduler.step(val_loss)
         
         # Print epoch summary
-        print(f"\nEpoch {epoch+1}/{max_epochs}:")
-        print(f"Train MSE: {train_metrics['mse']:.4f} | Val MSE: {val_metrics['mse']:.4f}")
-        print(f"Train MAE: {train_metrics['mae']:.4f} | Val MAE: {val_metrics['mae']:.4f}")
-        print(f"LR: {history['lr'][-1]:.2e}")
+        print(f"\nEpoch {epoch+1}:")
+        print(f"Train Loss: {np.mean(running_loss):.4f}")
+        print(f"Val Loss: {val_loss:.4f}")
+        print(f"Val MAE: {mae_loss:.4f}")
         
         # Save best model
-        if val_metrics['mse'] < best_val_loss:
-            best_val_loss = val_metrics['mse']
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'loss': best_val_loss,
-                'metrics': val_metrics,
-                'history': history
-            }, f"./runs/run-{project_name}/models/best_model.tar")
-            print(f"New best model saved with Val MSE: {best_val_loss:.4f}")
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), f"./runs/run-{project_name}/models/best_model.pt")
+            print(f"Saved new best model with Val Loss: {best_val_loss:.4f}")
     
-    return history
-
-def load_best_model(model, project_name):
-    """Load the best saved model"""
-    checkpoint = torch.load(f"./runs/run-{project_name}/models/best_model.tar")
-    model.load_state_dict(checkpoint['model_state_dict'])
-    return model, checkpoint['history']
+    print("\nTraining completed!")
 
 if __name__ == '__main__':
-    # Example usage (would normally be called from main.py)
     print("This module contains training utilities and should be imported")
