@@ -27,7 +27,7 @@ def evaluate_model(model, dataloader):
             if not isinstance(labels, torch.Tensor):
                 labels = torch.FloatTensor(labels)
                 
-            outputs, _ = model([
+            outputs, _ , _= model([
                 solute_graphs.to(device),
                 solvent_graphs.to(device),
                 solute_lens.to(device),
@@ -65,7 +65,8 @@ def get_metrics(model, data_loader):
             labels = labels.to(device)
             
             # Forward pass
-            outputs, _ = model(inputs)
+            outputs, _, _ = model(inputs)
+
             
             # Calculate losses
             loss = loss_fn(outputs, labels)
@@ -117,7 +118,8 @@ def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, p
             labels = labels.to(device)
             
             # Forward pass
-            outputs, interaction_map = model([solute_graphs, solvent_graphs, solute_lens, solvent_lens])
+            outputs, _, interaction_map = model([solute_graphs, solvent_graphs, solute_lens, solvent_lens])
+
             
             # Calculate loss with L1 regularization
             l1_norm = torch.norm(interaction_map, p=2) * 1e-4
