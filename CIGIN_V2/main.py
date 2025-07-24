@@ -33,44 +33,60 @@ rdBase.DisableLog('rdApp.error')
 warnings.filterwarnings("ignore")
 
 # Argument parsing
-parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='cigin', help="The name of the current project: default: CIGIN")
-parser.add_argument('--interaction', help="type of interaction function to use: dot | scaled-dot | general | tanh-general", 
-                    default='dot')
-parser.add_argument('--max_epochs', required=False, default=100, help="The max number of epochs for training")
-parser.add_argument('--batch_size', required=False, default=32, help="The batch size for training")
-parser.add_argument('--model_type', required=False, default='both', choices=['original', 'transformer', 'both'],
-                    help="Which model to train: original, transformer, or both")
-parser.add_argument('--num_heads', required=False, default=6, help="Number of attention heads for transformer (use 6 for 42-dim)")
-parser.add_argument('--hidden_dim', required=False, default=48, help="Hidden dimension (should be divisible by num_heads)")
+parser = argparse.ArgumentParser(description='CIGIN Model Comparison')
+parser.add_argument('--name', default='cigin', help="Project name (default: cigin)")
+parser.add_argument('--interaction', default='dot', 
+                    choices=['dot', 'scaled-dot', 'general', 'tanh-general'],
+                    help="Interaction function type")
+parser.add_argument('--max_epochs', type=int, default=100,
+                    help="Maximum training epochs (default: 100)")
+parser.add_argument('--batch_size', type=int, default=32,
+                    help="Training batch size (default: 32)")
+parser.add_argument('--model_type', default='both', 
+                    choices=['original', 'transformer', 'both'],
+                    help="Which model(s) to train")
+parser.add_argument('--num_heads', type=int, default=6,
+                    help="Number of attention heads (default: 6)")
+parser.add_argument('--hidden_dim', type=int, default=42,
+                    help="Hidden dimension (default: 42 to match original)")
+parser.add_argument('--lr', type=float, default=0.001,
+                    help="Learning rate (default: 0.001)")
+parser.add_argument('--scheduler_patience', type=int, default=5,
+                    help="LR scheduler patience (default: 5)")
 
 args = parser.parse_args()
-project_name = args.name
-interaction = args.interaction
-max_epochs = int(args.max_epochs)
-batch_size = int(args.batch_size)
-model_type = args.model_type
-num_heads = int(args.num_heads)
-hidden_dim = int(args.hidden_dim)
+
+# Configuration
+config = {
+    'project_name': args.name,
+    'interaction': args.interaction,
+    'max_epochs': args.max_epochs,
+    'batch_size': args.batch_size,
+    'model_type': args.model_type,
+    'num_heads': args.num_heads,
+    'hidden_dim': args.hidden_dim,
+    'learning_rate': args.lr,
+    'scheduler_patience': args.scheduler_patience,
+    'valid_batch_size': 128,  # Kept same as original
+    'test_batch_size': 128    # Kept same as original
+}
 
 # Ensure hidden_dim is divisible by num_heads
-if hidden_dim % num_heads != 0:
-    # Adjust hidden_dim to be divisible by num_heads
-    hidden_dim = ((hidden_dim // num_heads) + 1) * num_heads
-    print(f"Adjusted hidden_dim to {hidden_dim} to be divisible by {num_heads} heads")
+if config['hidden_dim'] % config['num_heads'] != 0:
+    config['hidden_dim'] = ((config['hidden_dim'] // config['num_heads']) + 1) * config['num_heads']
+    print(f"Adjusted hidden_dim to {config['hidden_dim']} to be divisible by {config['num_heads']} heads")
 
 # Device configuration
-use_cuda = torch.cuda.is_available()
-device = torch.device("cuda" if use_cuda else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # Create output directories
-if not os.path.isdir("runs/run-" + str(project_name)):
-    os.makedirs("./runs/run-" + str(project_name))
-    os.makedirs("./runs/run-" + str(project_name) + "/models")
+if not os.path.isdir(f"runs/run-{config['project_name']}"):
+    os.makedirs(f"./runs/run-{config['project_name']}")
+    os.makedirs(f"./runs/run-{config['project_name']}/models")
 
 def collate(samples):
-    """Batch preparation function"""
+    """Batch preparation function (identical to original)"""
     solute_graphs, solvent_graphs, labels = map(list, zip(*samples))
     solute_graphs = dgl.batch(solute_graphs)
     solvent_graphs = dgl.batch(solvent_graphs)
@@ -79,7 +95,7 @@ def collate(samples):
     return solute_graphs, solvent_graphs, solute_len_matrix, solvent_len_matrix, labels
 
 class Dataclass(Dataset):
-    """Custom dataset class"""
+    """Custom dataset class (identical to original)"""
     def __init__(self, dataset):
         self.dataset = dataset
 
@@ -103,149 +119,158 @@ class Dataclass(Dataset):
         return [solute_graph, solvent_graph, [delta_g]]
 
 def count_parameters(model):
-    """Count the number of trainable parameters in a model"""
+    """Count trainable parameters (added feature)"""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def train_and_evaluate_model(model, model_name, train_loader, valid_loader, test_loader, max_epochs):
-    """Train and evaluate a single model"""
+def train_and_evaluate_model(model, model_name, config, train_loader, valid_loader, test_loader):
+    """Enhanced training function with metrics tracking"""
     print(f"\n{'='*50}")
     print(f"Training {model_name}")
-    print(f"Number of parameters: {count_parameters(model):,}")
+    print(f"Parameters: {count_parameters(model):,}")
+    print(f"Config: {config}")
     print(f"{'='*50}")
     
     model.to(device)
     
-    # Training setup
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    scheduler = ReduceLROnPlateau(optimizer, patience=5, mode='min', verbose=True)
+    # Training setup (matches original parameters)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
+    scheduler = ReduceLROnPlateau(
+        optimizer, 
+        patience=config['scheduler_patience'], 
+        mode='min', 
+        verbose=True
+    )
     
-    # Record training time
     start_time = time.time()
     
-    # Training
-    project_name_model = f"{project_name}_{model_name}"
-    train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name_model)
+    # Train (using original training function)
+    train(
+        config['max_epochs'],
+        model,
+        optimizer,
+        scheduler,
+        train_loader,
+        valid_loader,
+        f"{config['project_name']}_{model_name}"
+    )
     
     training_time = time.time() - start_time
     
-    # Final evaluation on test set
+    # Evaluation
     model.eval()
     test_loss, test_mae = get_metrics(model, test_loader)
+    test_rmse = np.sqrt(test_loss)
     
     print(f"\n{model_name} Results:")
-    print(f"Training time: {training_time:.2f} seconds ({training_time/60:.2f} minutes)")
-    print(f"Test MSE Loss: {test_loss:.4f}")
-    print(f"Test MAE Loss: {test_mae:.4f}")
-    print(f"Test RMSE: {np.sqrt(test_loss):.4f}")
+    print(f"Training Time: {training_time/60:.2f} minutes")
+    print(f"Test MSE: {test_loss:.4f}")
+    print(f"Test MAE: {test_mae:.4f}")
+    print(f"Test RMSE: {test_rmse:.4f}")
     
     return {
         'model_name': model_name,
+        'parameters': count_parameters(model),
         'test_mse': test_loss,
         'test_mae': test_mae,
-        'test_rmse': np.sqrt(test_loss),
+        'test_rmse': test_rmse,
         'training_time': training_time,
-        'parameters': count_parameters(model)
+        'config': config
     }
 
 def main():
-    # Data loading and splitting
-    print("Loading and preparing data...")
+    # Data loading and splitting (identical to original)
+    print("Loading data...")
     df = pd.read_csv('https://raw.githubusercontent.com/adithyamauryakr/CIGIN-DevaLab/refs/heads/master/CIGIN_V2/data/whole_data.csv')
     df.columns = df.columns.str.strip()
     
-    print(f"Dataset size: {len(df)} samples")
-    
-    # Split data into train/valid/test (80/10/10)
+    # Same split as original (80/10/10)
     train_df, test_df = train_test_split(df, test_size=0.1, random_state=42)
     train_df, valid_df = train_test_split(train_df, test_size=0.111, random_state=42)
     
-    print(f"Train: {len(train_df)}, Valid: {len(valid_df)}, Test: {len(test_df)}")
+    print(f"Dataset sizes - Train: {len(train_df)}, Valid: {len(valid_df)}, Test: {len(test_df)}")
 
-    # Create datasets
+    # Create datasets and loaders (same as original)
     train_dataset = Dataclass(train_df)
     valid_dataset = Dataclass(valid_df)
     test_dataset = Dataclass(test_df)
 
-    # Create data loaders
-    train_loader = DataLoader(train_dataset, collate_fn=collate, batch_size=batch_size, shuffle=True)
-    valid_loader = DataLoader(valid_dataset, collate_fn=collate, batch_size=128)
-    test_loader = DataLoader(test_dataset, collate_fn=collate, batch_size=128)
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=config['batch_size'], 
+        shuffle=True,
+        collate_fn=collate
+    )
+    valid_loader = DataLoader(
+        valid_dataset,
+        batch_size=config['valid_batch_size'],
+        collate_fn=collate
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config['test_batch_size'],
+        collate_fn=collate
+    )
     
     results = []
     
-    # Train models based on user choice
-    if model_type in ['original', 'both']:
-        print("\nInitializing Original CIGIN Model (Set2Set + Message Passing)...")
+    # Model training based on selection
+    if config['model_type'] in ['original', 'both']:
         original_model = CIGINModel(
-            interaction=interaction,
-            node_hidden_dim=42  # Keep original dimension
+            interaction=config['interaction'],
+            node_hidden_dim=42  # Force original dimension
         )
         results.append(train_and_evaluate_model(
-            original_model, "Original_CIGIN", train_loader, valid_loader, test_loader, max_epochs
+            original_model, 
+            "Original_CIGIN", 
+            config,
+            train_loader, 
+            valid_loader, 
+            test_loader
         ))
     
-    if model_type in ['transformer', 'both']:
-        print(f"\nInitializing Graph Transformer CIGIN Model (hidden_dim={hidden_dim}, num_heads={num_heads})...")
+    if config['model_type'] in ['transformer', 'both']:
         transformer_model = CIGINGraphTransformerModel(
-            interaction=interaction,
-            node_hidden_dim=hidden_dim,  # Use adjusted dimension
-            num_heads=num_heads
+            interaction=config['interaction'],
+            node_hidden_dim=config['hidden_dim'],
+            num_heads=config['num_heads']
         )
         results.append(train_and_evaluate_model(
-            transformer_model, "GraphTransformer_CIGIN", train_loader, valid_loader, test_loader, max_epochs
+            transformer_model,
+            "GraphTransformer_CIGIN",
+            config,
+            train_loader,
+            valid_loader,
+            test_loader
         ))
     
-    # Print comparison results
+    # Benchmark comparison
     if len(results) > 1:
         print(f"\n{'='*80}")
-        print("BENCHMARK COMPARISON RESULTS")
+        print("BENCHMARK COMPARISON")
         print(f"{'='*80}")
         
-        print(f"{'Model':<25} {'Parameters':<12} {'Test MSE':<10} {'Test MAE':<10} {'Test RMSE':<11} {'Time (min)':<10}")
-        print(f"{'-'*80}")
-        
-        for result in results:
-            print(f"{result['model_name']:<25} {result['parameters']:<12,} {result['test_mse']:<10.4f} "
-                  f"{result['test_mae']:<10.4f} {result['test_rmse']:<11.4f} {result['training_time']/60:<10.2f}")
+        # Print comparison table
+        print(f"{'Model':<25} {'Params':<12} {'MSE':<10} {'MAE':<10} {'RMSE':<10} {'Time (min)':<10}")
+        print('-'*80)
+        for r in results:
+            print(f"{r['model_name']:<25} {r['parameters']:<12,} {r['test_mse']:<10.4f} "
+                  f"{r['test_mae']:<10.4f} {r['test_rmse']:<10.4f} {r['training_time']/60:<10.2f}")
         
         # Calculate improvements
-        if len(results) == 2:
-            original_result = next(r for r in results if 'Original' in r['model_name'])
-            transformer_result = next(r for r in results if 'GraphTransformer' in r['model_name'])
-            
-            mse_improvement = ((original_result['test_mse'] - transformer_result['test_mse']) / original_result['test_mse']) * 100
-            mae_improvement = ((original_result['test_mae'] - transformer_result['test_mae']) / original_result['test_mae']) * 100
-            rmse_improvement = ((original_result['test_rmse'] - transformer_result['test_rmse']) / original_result['test_rmse']) * 100
-            
-            print(f"\n{'='*80}")
-            print("IMPROVEMENT ANALYSIS")
-            print(f"{'='*80}")
-            print(f"MSE Improvement: {mse_improvement:+.2f}% {'(Better)' if mse_improvement > 0 else '(Worse)'}")
-            print(f"MAE Improvement: {mae_improvement:+.2f}% {'(Better)' if mae_improvement > 0 else '(Worse)'}")
-            print(f"RMSE Improvement: {rmse_improvement:+.2f}% {'(Better)' if rmse_improvement > 0 else '(Worse)'}")
-            
-            param_ratio = transformer_result['parameters'] / original_result['parameters']
-            print(f"Parameter Ratio: {param_ratio:.2f}x {'(More parameters)' if param_ratio > 1 else '(Fewer parameters)'}")
-            
-            time_ratio = transformer_result['training_time'] / original_result['training_time']
-            print(f"Training Time Ratio: {time_ratio:.2f}x {'(Slower)' if time_ratio > 1 else '(Faster)'}")
+        orig = next(r for r in results if 'Original' in r['model_name'])
+        trans = next(r for r in results if 'GraphTransformer' in r['model_name'])
         
-        # Save results to CSV
-        results_df = pd.DataFrame(results)
-        results_df.to_csv(f"runs/run-{project_name}/benchmark_results.csv", index=False)
-        print(f"\nResults saved to: runs/run-{project_name}/benchmark_results.csv")
-    
-    else:
-        print(f"\n{'='*50}")
-        print("SINGLE MODEL RESULTS")
-        print(f"{'='*50}")
-        result = results[0]
-        print(f"Model: {result['model_name']}")
-        print(f"Parameters: {result['parameters']:,}")
-        print(f"Test MSE: {result['test_mse']:.4f}")
-        print(f"Test MAE: {result['test_mae']:.4f}")
-        print(f"Test RMSE: {result['test_rmse']:.4f}")
-        print(f"Training Time: {result['training_time']/60:.2f} minutes")
+        print(f"\nImprovement Analysis:")
+        print(f"- Parameters: {trans['parameters']/orig['parameters']:.2f}x")
+        print(f"- Training Time: {trans['training_time']/orig['training_time']:.2f}x")
+        print(f"- MSE: {(orig['test_mse']-trans['test_mse'])/orig['test_mse']*100:+.2f}%")
+        print(f"- MAE: {(orig['test_mae']-trans['test_mae'])/orig['test_mae']*100:+.2f}%")
+        
+        # Save results
+        pd.DataFrame(results).to_csv(
+            f"runs/run-{config['project_name']}/benchmark_results.csv",
+            index=False
+        )
 
 if __name__ == '__main__':
     main()
