@@ -2,84 +2,72 @@ from tqdm import tqdm
 import torch
 import numpy as np
 
-class EnhancedTrainer:
-    def __init__(self, device=None):
-        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.mse_loss = torch.nn.MSELoss()
-        self.mae_loss = torch.nn.L1Loss()
-        
-    def compute_metrics(self, model, data_loader):
-        model.eval()
-        total_loss = 0
-        total_mae = 0
-        with torch.no_grad():
-            for solute, solvent, solute_len, solvent_len, labels in data_loader:
-                outputs, _ = model([
-                    solute.to(self.device),
-                    solvent.to(self.device),
-                    solute_len.to(self.device),
-                    solvent_len.to(self.device)
-                ])
-                targets = torch.tensor(labels).float().to(self.device)
-                total_loss += self.mse_loss(outputs, targets).item()
-                total_mae += self.mae_loss(outputs, targets).item()
-        return total_loss/len(data_loader), total_mae/len(data_loader)
+loss_fn = torch.nn.MSELoss()
+mae_loss_fn = torch.nn.L1Loss()
 
-    def train_epoch(self, model, optimizer, train_loader, grad_clip=1.0):
-        model.train()
-        epoch_loss = 0
-        for solute, solvent, solute_len, solvent_len, labels in tqdm(train_loader, desc="Training"):
-            optimizer.zero_grad()
-            
-            # Forward pass
-            outputs, interaction_map = model([
-                solute.to(self.device),
-                solvent.to(self.device),
-                solute_len.to(self.device),
-                solvent_len.to(self.device)
-            ])
-            
-            # Loss computation (matches original exactly)
-            targets = torch.tensor(labels).float().to(self.device)
-            loss = self.mse_loss(outputs, targets) + torch.norm(interaction_map, p=2) * 1e-4
-            
-            # Backward pass with optional gradient clipping
-            loss.backward()
-            if grad_clip:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
-            
-            epoch_loss += loss.item()
-        return epoch_loss / len(train_loader)
+use_cuda = torch.cuda.is_available()
+device = torch.device("cuda" if use_cuda else "cpu")
 
-def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name):
-    trainer = EnhancedTrainer()
-    best_val_loss = float('inf')
-    
-    for epoch in range(max_epochs):
-        # Training
-        train_loss = trainer.train_epoch(model, optimizer, train_loader)
-        
-        # Validation
-        val_loss, val_mae = trainer.compute_metrics(model, valid_loader)
-        scheduler.step(val_loss)
-        
-        # Logging
-        print(f"Epoch {epoch+1}/{max_epochs}: "
-              f"Train Loss: {train_loss:.4f} | "
-              f"Val Loss: {val_loss:.4f} | "
-              f"Val MAE: {val_mae:.4f}")
-        
-        # Checkpoint
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save({
-                'epoch': epoch,
-                'model_state': model.state_dict(),
-                'optimizer_state': optimizer.state_dict(),
-                'loss': val_loss,
-            }, f"./runs/run-{project_name}/models/best_model.tar")
+def evaluate_model(model, dataloader):
+    model.eval()
+    preds, targets = [], []
+    with torch.no_grad():
+        for samples in dataloader:
+            outputs, _ = model([samples[0].to(device), samples[1].to(device),
+                                samples[2].to(device), samples[3].to(device)])
+            preds.extend(outputs.cpu().numpy())
+            targets.extend(samples[4].numpy())
+    preds, targets = np.array(preds), np.array(targets)
+    rmse = np.sqrt(np.mean((preds - targets) ** 2))
+    return rmse
 
 def get_metrics(model, data_loader):
-    trainer = EnhancedTrainer()
-    return trainer.compute_metrics(model, data_loader)
+    valid_outputs = []
+    valid_labels = []
+    valid_loss = []
+    valid_mae_loss = []
+    for solute_graphs, solvent_graphs, solute_lens, solvent_lens, labels in data_loader:
+        outputs, i_map = model(
+            [solute_graphs.to(device), solvent_graphs.to(device), torch.tensor(solute_lens).to(device),
+             torch.tensor(solvent_lens).to(device)])
+        loss = loss_fn(outputs, torch.tensor(labels).to(device).float())
+        mae_loss = mae_loss_fn(outputs, torch.tensor(labels).to(device).float())
+        valid_outputs += outputs.cpu().detach().numpy().tolist()
+        valid_loss.append(loss.cpu().detach().numpy())
+        valid_mae_loss.append(mae_loss.cpu().detach().numpy())
+        valid_labels += labels
+
+    loss = np.mean(np.array(valid_loss).flatten())
+    mae_loss = np.mean(np.array(valid_mae_loss).flatten())
+    return loss, mae_loss
+
+
+def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name):
+    best_val_loss = 100
+    for epoch in range(max_epochs):
+        model.train()
+        running_loss = []
+        tq_loader = tqdm(train_loader)
+        o = {}
+        for samples in tq_loader:
+            optimizer.zero_grad()
+            outputs, interaction_map = model(
+                [samples[0].to(device), samples[1].to(device), torch.tensor(samples[2]).to(device),
+                 torch.tensor(samples[3]).to(device)])
+            l1_norm = torch.norm(interaction_map, p=2) * 1e-4
+            loss = loss_fn(outputs, torch.tensor(samples[4]).to(device).float()) + l1_norm
+            loss.backward()
+            optimizer.step()
+            loss = loss - l1_norm
+            running_loss.append(loss.cpu().detach())
+            tq_loader.set_description(
+                "Epoch: " + str(epoch + 1) + "  Training loss: " + str(np.mean(np.array(running_loss))))
+        model.eval()
+        val_loss, mae_loss = get_metrics(model, valid_loader)
+        scheduler.step(val_loss)
+        print("Epoch: " + str(epoch + 1) + "  train_loss " + str(np.mean(np.array(running_loss))) + " Val_loss " + str(
+            val_loss) + " MAE Val_loss " + str(mae_loss))
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), "./runs/run-" + str(project_name) + "/models/best_model.tar")
+
