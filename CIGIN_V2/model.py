@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class EnhancedGatherModel(nn.Module):
+class GatherModel(nn.Module):
     def __init__(self, node_input_dim=42, edge_input_dim=10, 
                  node_hidden_dim=42, edge_hidden_dim=42, 
                  num_step_message_passing=6):
@@ -68,12 +68,12 @@ class EnhancedCIGINModel(nn.Module):
         self.temperature = nn.Parameter(torch.tensor(1.0))
         
         # Enhanced gather models
-        self.solute_gather = EnhancedGatherModel(
+        self.solute_gather = GatherModel(
             node_input_dim, edge_input_dim, 
             node_hidden_dim, edge_hidden_dim,
             num_step_message_passing
         )
-        self.solvent_gather = EnhancedGatherModel(
+        self.solvent_gather = GatherModel(
             node_input_dim, edge_input_dim,
             node_hidden_dim, edge_hidden_dim,
             num_step_message_passing
