@@ -114,6 +114,8 @@ def main():
     # Training setup
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     scheduler = ReduceLROnPlateau(optimizer, patience=5, mode='min', verbose=True)
+    initialize_logger()
+
 
     # Training loop
     train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name)
