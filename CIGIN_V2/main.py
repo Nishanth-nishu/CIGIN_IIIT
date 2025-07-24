@@ -176,4 +176,64 @@ def main():
     if model_type in ['transformer', 'both']:
         print(f"\nInitializing Graph Transformer CIGIN Model (num_heads={num_heads})...")
         transformer_model = CIGINGraphTransformerModel(
-            interaction=interaction
+            interaction=interaction,
+            num_heads=num_heads
+        )
+        results.append(train_and_evaluate_model(
+            transformer_model, "GraphTransformer_CIGIN", train_loader, valid_loader, test_loader, max_epochs
+        ))
+    
+    # Print comparison results
+    if len(results) > 1:
+        print(f"\n{'='*80}")
+        print("BENCHMARK COMPARISON RESULTS")
+        print(f"{'='*80}")
+        
+        print(f"{'Model':<25} {'Parameters':<12} {'Test MSE':<10} {'Test MAE':<10} {'Test RMSE':<11} {'Time (min)':<10}")
+        print(f"{'-'*80}")
+        
+        for result in results:
+            print(f"{result['model_name']:<25} {result['parameters']:<12,} {result['test_mse']:<10.4f} "
+                  f"{result['test_mae']:<10.4f} {result['test_rmse']:<11.4f} {result['training_time']/60:<10.2f}")
+        
+        # Calculate improvements
+        if len(results) == 2:
+            original_result = next(r for r in results if 'Original' in r['model_name'])
+            transformer_result = next(r for r in results if 'GraphTransformer' in r['model_name'])
+            
+            mse_improvement = ((original_result['test_mse'] - transformer_result['test_mse']) / original_result['test_mse']) * 100
+            mae_improvement = ((original_result['test_mae'] - transformer_result['test_mae']) / original_result['test_mae']) * 100
+            rmse_improvement = ((original_result['test_rmse'] - transformer_result['test_rmse']) / original_result['test_rmse']) * 100
+            
+            print(f"\n{'='*80}")
+            print("IMPROVEMENT ANALYSIS")
+            print(f"{'='*80}")
+            print(f"MSE Improvement: {mse_improvement:+.2f}% {'(Better)' if mse_improvement > 0 else '(Worse)'}")
+            print(f"MAE Improvement: {mae_improvement:+.2f}% {'(Better)' if mae_improvement > 0 else '(Worse)'}")
+            print(f"RMSE Improvement: {rmse_improvement:+.2f}% {'(Better)' if rmse_improvement > 0 else '(Worse)'}")
+            
+            param_ratio = transformer_result['parameters'] / original_result['parameters']
+            print(f"Parameter Ratio: {param_ratio:.2f}x {'(More parameters)' if param_ratio > 1 else '(Fewer parameters)'}")
+            
+            time_ratio = transformer_result['training_time'] / original_result['training_time']
+            print(f"Training Time Ratio: {time_ratio:.2f}x {'(Slower)' if time_ratio > 1 else '(Faster)'}")
+        
+        # Save results to CSV
+        results_df = pd.DataFrame(results)
+        results_df.to_csv(f"runs/run-{project_name}/benchmark_results.csv", index=False)
+        print(f"\nResults saved to: runs/run-{project_name}/benchmark_results.csv")
+    
+    else:
+        print(f"\n{'='*50}")
+        print("SINGLE MODEL RESULTS")
+        print(f"{'='*50}")
+        result = results[0]
+        print(f"Model: {result['model_name']}")
+        print(f"Parameters: {result['parameters']:,}")
+        print(f"Test MSE: {result['test_mse']:.4f}")
+        print(f"Test MAE: {result['test_mae']:.4f}")
+        print(f"Test RMSE: {result['test_rmse']:.4f}")
+        print(f"Training Time: {result['training_time']/60:.2f} minutes")
+
+if __name__ == '__main__':
+    main()
