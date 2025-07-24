@@ -54,7 +54,7 @@ class GatherModel(nn.Module):
         
         return out + init
 
-class EnhancedCIGINModel(nn.Module):
+class CIGINModel(nn.Module):
     def __init__(self, node_input_dim=42, edge_input_dim=10, 
                  node_hidden_dim=42, edge_hidden_dim=42,
                  num_step_message_passing=6, interaction='dot',
