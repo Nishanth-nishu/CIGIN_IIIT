@@ -5,6 +5,7 @@ import os
 import argparse
 from sklearn.model_selection import train_test_split
 import numpy as np
+import time
 
 # rdkit imports
 from rdkit import RDLogger
@@ -20,7 +21,7 @@ import torch
 import dgl
 
 # local imports
-from model import CIGINModel
+from model_graph_transformer import CIGINModel, CIGINGraphTransformerModel
 from train import train, get_metrics
 from molecular_graph import get_graph_from_smile
 from utils import *
@@ -38,16 +39,22 @@ parser.add_argument('--interaction', help="type of interaction function to use: 
                     default='dot')
 parser.add_argument('--max_epochs', required=False, default=100, help="The max number of epochs for training")
 parser.add_argument('--batch_size', required=False, default=32, help="The batch size for training")
+parser.add_argument('--model_type', required=False, default='both', choices=['original', 'transformer', 'both'],
+                    help="Which model to train: original, transformer, or both")
+parser.add_argument('--num_heads', required=False, default=8, help="Number of attention heads for transformer")
 
 args = parser.parse_args()
 project_name = args.name
 interaction = args.interaction
 max_epochs = int(args.max_epochs)
 batch_size = int(args.batch_size)
+model_type = args.model_type
+num_heads = int(args.num_heads)
 
 # Device configuration
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
+print(f"Using device: {device}")
 
 # Create output directories
 if not os.path.isdir("runs/run-" + str(project_name)):
@@ -87,14 +94,64 @@ class Dataclass(Dataset):
         delta_g = self.dataset.iloc[idx]['delGsolv']
         return [solute_graph, solvent_graph, [delta_g]]
 
+def count_parameters(model):
+    """Count the number of trainable parameters in a model"""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+def train_and_evaluate_model(model, model_name, train_loader, valid_loader, test_loader, max_epochs):
+    """Train and evaluate a single model"""
+    print(f"\n{'='*50}")
+    print(f"Training {model_name}")
+    print(f"Number of parameters: {count_parameters(model):,}")
+    print(f"{'='*50}")
+    
+    model.to(device)
+    
+    # Training setup
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    scheduler = ReduceLROnPlateau(optimizer, patience=5, mode='min', verbose=True)
+    
+    # Record training time
+    start_time = time.time()
+    
+    # Training
+    project_name_model = f"{project_name}_{model_name}"
+    train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name_model)
+    
+    training_time = time.time() - start_time
+    
+    # Final evaluation on test set
+    model.eval()
+    test_loss, test_mae = get_metrics(model, test_loader)
+    
+    print(f"\n{model_name} Results:")
+    print(f"Training time: {training_time:.2f} seconds ({training_time/60:.2f} minutes)")
+    print(f"Test MSE Loss: {test_loss:.4f}")
+    print(f"Test MAE Loss: {test_mae:.4f}")
+    print(f"Test RMSE: {np.sqrt(test_loss):.4f}")
+    
+    return {
+        'model_name': model_name,
+        'test_mse': test_loss,
+        'test_mae': test_mae,
+        'test_rmse': np.sqrt(test_loss),
+        'training_time': training_time,
+        'parameters': count_parameters(model)
+    }
+
 def main():
     # Data loading and splitting
+    print("Loading and preparing data...")
     df = pd.read_csv('https://raw.githubusercontent.com/adithyamauryakr/CIGIN-DevaLab/refs/heads/master/CIGIN_V2/data/whole_data.csv')
     df.columns = df.columns.str.strip()
+    
+    print(f"Dataset size: {len(df)} samples")
     
     # Split data into train/valid/test (80/10/10)
     train_df, test_df = train_test_split(df, test_size=0.1, random_state=42)
     train_df, valid_df = train_test_split(train_df, test_size=0.111, random_state=42)
+    
+    print(f"Train: {len(train_df)}, Valid: {len(valid_df)}, Test: {len(test_df)}")
 
     # Create datasets
     train_dataset = Dataclass(train_df)
@@ -105,24 +162,18 @@ def main():
     train_loader = DataLoader(train_dataset, collate_fn=collate, batch_size=batch_size, shuffle=True)
     valid_loader = DataLoader(valid_dataset, collate_fn=collate, batch_size=128)
     test_loader = DataLoader(test_dataset, collate_fn=collate, batch_size=128)
-
-    # Initialize model (only Set2Set version)
-    model = CIGINModel(interaction=interaction)
-    model.to(device)
     
-    # Training setup
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    scheduler = ReduceLROnPlateau(optimizer, patience=5, mode='min', verbose=True)
-
-    # Training loop
-    train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name)
-
-    # Final evaluation on test set
-    model.eval()
-    loss, mae_loss = get_metrics(model, test_loader)
-    print(f"\nFinal test set performance:")
-    print(f"MSE Loss: {loss:.4f}")
-    print(f"MAE Loss: {mae_loss:.4f}")
-
-if __name__ == '__main__':
-    main()
+    results = []
+    
+    # Train models based on user choice
+    if model_type in ['original', 'both']:
+        print("\nInitializing Original CIGIN Model (Set2Set + Message Passing)...")
+        original_model = CIGINModel(interaction=interaction)
+        results.append(train_and_evaluate_model(
+            original_model, "Original_CIGIN", train_loader, valid_loader, test_loader, max_epochs
+        ))
+    
+    if model_type in ['transformer', 'both']:
+        print(f"\nInitializing Graph Transformer CIGIN Model (num_heads={num_heads})...")
+        transformer_model = CIGINGraphTransformerModel(
+            interaction=interaction
