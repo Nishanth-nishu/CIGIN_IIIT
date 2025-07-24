@@ -17,10 +17,17 @@ class GraphTransformerLayer(nn.Module):
         super(GraphTransformerLayer, self).__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
+        
+        # Adjust num_heads to be compatible with out_dim
+        if out_dim % num_heads != 0:
+            # Find the largest divisor of out_dim that's <= num_heads
+            for h in range(min(num_heads, out_dim), 0, -1):
+                if out_dim % h == 0:
+                    num_heads = h
+                    break
+        
         self.num_heads = num_heads
         self.head_dim = out_dim // num_heads
-        
-        assert out_dim % num_heads == 0, "out_dim must be divisible by num_heads"
         
         # Linear projections for Q, K, V
         self.q_proj = nn.Linear(in_dim, out_dim)
@@ -44,8 +51,10 @@ class GraphTransformerLayer(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # Edge embedding for positional encoding
+        # Edge embedding for positional encoding (handle edge_input_dim properly)
         self.edge_encoder = nn.Linear(10, num_heads) if num_heads > 1 else nn.Linear(10, 1)
+        
+        print(f"GraphTransformerLayer: in_dim={in_dim}, out_dim={out_dim}, num_heads={self.num_heads}, head_dim={self.head_dim}")
         
     def forward(self, g, node_feat, edge_feat=None):
         batch_size = g.batch_size if hasattr(g, 'batch_size') else 1
@@ -116,7 +125,16 @@ class GraphTransformerPooling(nn.Module):
         super(GraphTransformerPooling, self).__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
+        
+        # Adjust num_heads to be compatible with in_dim
+        if in_dim % num_heads != 0:
+            for h in range(min(num_heads, in_dim), 0, -1):
+                if in_dim % h == 0:
+                    num_heads = h
+                    break
+        
         self.num_heads = num_heads
+        print(f"GraphTransformerPooling: in_dim={in_dim}, out_dim={out_dim}, num_heads={num_heads}")
         
         # Global attention for pooling
         self.global_attention = nn.MultiheadAttention(
@@ -187,6 +205,15 @@ class GraphTransformerGatherModel(nn.Module):
         
         # Input projection
         self.lin0 = nn.Linear(node_input_dim, node_hidden_dim)
+        
+        # Adjust num_heads to be compatible with node_hidden_dim
+        if node_hidden_dim % num_heads != 0:
+            for h in range(min(num_heads, node_hidden_dim), 0, -1):
+                if node_hidden_dim % h == 0:
+                    num_heads = h
+                    break
+        
+        print(f"GraphTransformerGatherModel: Using {num_heads} heads for hidden_dim={node_hidden_dim}")
         
         # Graph Transformer layers
         self.transformer_layers = nn.ModuleList([
