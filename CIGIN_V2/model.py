@@ -13,7 +13,7 @@ class MolecularFeatureEnhancer(nn.Module):
         self.node_encoder = nn.Sequential(
             nn.Linear(node_dim, node_dim),
             nn.ReLU(),
-            nn.LayerNorm(node_dim)
+            nn.LayerNorm(node_dim))
         self.edge_encoder = nn.Sequential(
             nn.Linear(edge_dim, edge_dim),
             nn.ReLU(),
