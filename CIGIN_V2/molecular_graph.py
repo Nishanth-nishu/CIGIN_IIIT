@@ -3,7 +3,7 @@ from dgl import DGLGraph
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors as rdDesc
 from utils import one_of_k_encoding_unk, one_of_k_encoding
-
+import torch
 
 def get_atom_features(atom, stereo, features, explicit_H=False):
     """
@@ -87,10 +87,10 @@ def get_graph_from_smile(molecule_smile):
         for j in range(molecule.GetNumAtoms()):
             bond_ij = molecule.GetBondBetweenAtoms(i, j)
             if bond_ij is not None:
-                G.add_edge(i, j)
+                G.add_edges(i, j)
                 bond_features_ij = get_bond_features(bond_ij)
                 edge_features.append(bond_features_ij)
 
-    G.ndata['x'] = np.array(node_features)
-    G.edata['w'] = np.array(edge_features)
+    G.ndata['x'] = torch.tensor(node_features)
+    G.edata['w'] = torch.tensor(edge_features)
     return G
