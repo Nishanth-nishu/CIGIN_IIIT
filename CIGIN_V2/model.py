@@ -4,6 +4,8 @@ from dgl.nn.pytorch import Set2Set, NNConv
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import dgl.function as fn
+
 
 class GatherModel(nn.Module):
     def __init__(self, node_input_dim=42, edge_input_dim=10, 
