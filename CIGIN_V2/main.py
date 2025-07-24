@@ -55,12 +55,12 @@ if not os.path.isdir("runs/run-" + str(project_name)):
     os.makedirs("./runs/run-" + str(project_name) + "/models")
 
 def collate(samples):
-    """Batch preparation function"""
     solute_graphs, solvent_graphs, labels = map(list, zip(*samples))
     solute_graphs = dgl.batch(solute_graphs)
     solvent_graphs = dgl.batch(solvent_graphs)
-    solute_len_matrix = get_len_matrix(solute_graphs.batch_num_nodes().tolist())
-    solvent_len_matrix = get_len_matrix(solvent_graphs.batch_num_nodes().tolist())
+    solute_len_matrix = torch.FloatTensor(get_len_matrix(solute_graphs.batch_num_nodes().tolist()))
+    solvent_len_matrix = torch.FloatTensor(get_len_matrix(solvent_graphs.batch_num_nodes().tolist()))
+    labels = torch.FloatTensor(labels)
     return solute_graphs, solvent_graphs, solute_len_matrix, solvent_len_matrix, labels
 
 class SolvationDataset(Dataset):
