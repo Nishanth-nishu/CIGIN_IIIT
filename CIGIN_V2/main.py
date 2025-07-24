@@ -21,14 +21,10 @@ import dgl
 
 # local imports
 from model import CIGINModel
-from train import train, evaluate_model, get_metrics
+from train import train, get_metrics
 from molecular_graph import get_graph_from_smile
 from utils import *
-from models.van_GAT import CIGINGAT
-from models.van_GGN import CIGINGGN
-from models.van_GCN import CIGINGCN
-from models.van_GAP import CIGINGAP
-from models.van_WAS import CIGINWAS
+
 
 lg = RDLogger.logger()
 lg.setLevel(RDLogger.CRITICAL)
