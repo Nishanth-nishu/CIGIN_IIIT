@@ -1,6 +1,7 @@
 from tqdm import tqdm
 import torch
 import numpy as np
+import os
 
 class EnhancedTrainer:
     def __init__(self, device=None):
@@ -14,17 +15,15 @@ class EnhancedTrainer:
         total_mae = 0
         with torch.no_grad():
             for solute, solvent, solute_len, solvent_len, labels in data_loader:
-                # Convert numpy arrays to tensors first
-                solute_len = torch.tensor(solute_len).to(self.device)
-                solvent_len = torch.tensor(solvent_len).to(self.device)
+                # Convert all inputs to proper tensors and device
+                solute = solute.to(self.device)
+                solvent = solvent.to(self.device)
+                solute_len = torch.tensor(solute_len, device=self.device)
+                solvent_len = torch.tensor(solvent_len, device=self.device)
+                targets = torch.tensor(labels, dtype=torch.float32, device=self.device)
                 
-                outputs, _ = model([
-                    solute.to(self.device),
-                    solvent.to(self.device),
-                    solute_len,
-                    solvent_len
-                ])
-                targets = torch.tensor(labels).float().to(self.device)
+                outputs, _ = model([solute, solvent, solute_len, solvent_len])
+                
                 total_loss += self.mse_loss(outputs, targets).item()
                 total_mae += self.mae_loss(outputs, targets).item()
         return total_loss/len(data_loader), total_mae/len(data_loader)
@@ -35,20 +34,17 @@ class EnhancedTrainer:
         for solute, solvent, solute_len, solvent_len, labels in tqdm(train_loader, desc="Training"):
             optimizer.zero_grad()
             
-            # Convert numpy arrays to tensors first
-            solute_len = torch.tensor(solute_len).to(self.device)
-            solvent_len = torch.tensor(solvent_len).to(self.device)
+            # Convert all inputs to proper tensors and device
+            solute = solute.to(self.device)
+            solvent = solvent.to(self.device)
+            solute_len = torch.tensor(solute_len, device=self.device)
+            solvent_len = torch.tensor(solvent_len, device=self.device)
+            targets = torch.tensor(labels, dtype=torch.float32, device=self.device)
             
             # Forward pass
-            outputs, interaction_map = model([
-                solute.to(self.device),
-                solvent.to(self.device),
-                solute_len,
-                solvent_len
-            ])
+            outputs, interaction_map = model([solute, solvent, solute_len, solvent_len])
             
-            # Loss computation
-            targets = torch.tensor(labels).float().to(self.device)
+            # Loss computation (matches original exactly)
             loss = self.mse_loss(outputs, targets) + torch.norm(interaction_map, p=2) * 1e-4
             
             # Backward pass
@@ -63,6 +59,10 @@ class EnhancedTrainer:
 def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name):
     trainer = EnhancedTrainer()
     best_val_loss = float('inf')
+    
+    # Create directory if it doesn't exist
+    save_dir = f"./runs/run-{project_name}/models"
+    os.makedirs(save_dir, exist_ok=True)
     
     for epoch in range(max_epochs):
         # Training
@@ -81,12 +81,14 @@ def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, p
         # Checkpoint
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            save_path = os.path.join(save_dir, "best_model.tar")
             torch.save({
                 'epoch': epoch,
                 'model_state': model.state_dict(),
                 'optimizer_state': optimizer.state_dict(),
                 'loss': val_loss,
-            }, f"./runs/run-{project_name}/models/best_model.tar")
+            }, save_path)
+            print(f"Saved new best model to {save_path}")
 
 def get_metrics(model, data_loader):
     trainer = EnhancedTrainer()
