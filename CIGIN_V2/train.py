@@ -10,6 +10,23 @@ import torch.cuda.amp as amp
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
 
+# Add this function to your existing train.py (keep everything else the same)
+def evaluate_model(model, dataloader):
+    model.eval()
+    preds = []
+    targets = []
+    with torch.no_grad():
+        for solute_graphs, solvent_graphs, solute_lens, solvent_lens, labels in dataloader:
+            outputs, _ = model([
+                solute_graphs.to(device),
+                solvent_graphs.to(device),
+                solute_lens.to(device),
+                solvent_lens.to(device)
+            ])
+            preds.extend(outputs.cpu().numpy())
+            targets.extend(labels)
+    return np.sqrt(np.mean((np.array(preds) - np.array(targets))**2))
+
 class MultiTaskLossWrapper(nn.Module):
     """Adaptive loss weighting for multi-task learning"""
     def __init__(self, task_num=3):
