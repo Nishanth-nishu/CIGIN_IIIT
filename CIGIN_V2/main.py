@@ -21,7 +21,7 @@ import dgl
 
 # local imports
 from model import CIGINModel
-from train import train, get_metrics
+from train import train, evaluate_model, get_metrics, initialize_logger
 from molecular_graph import get_graph_from_smile
 from utils import *
 
@@ -120,7 +120,7 @@ def main():
 
     # Final evaluation
     model.eval()
-    loss, mae_loss = get_metrics(model, test_loader)
+    loss, mae_loss = get_metrics(model, test_loader,devices)
     print(f"\nFinal test set performance:")
     print(f"MSE Loss: {loss:.4f}")
     print(f"MAE Loss: {mae_loss:.4f}")
