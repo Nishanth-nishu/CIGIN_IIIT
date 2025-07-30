@@ -1,213 +1,137 @@
-import random
-import pandas as pd
-import pickle
-import os
-import warnings
-from collections import OrderedDict
-from copy import deepcopy
-import numpy as np
-import seaborn as sns
-
-
-from rdkit import Chem, DataStructs
-from rdkit.Chem import rdMolDescriptors as rdDesc
-from rdkit.Chem import AllChem
-from rdkit import rdBase
-from rdkit import RDLogger
-
-
 import torch
 import torch.nn as nn
-from torch.autograd import Variable
-import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils import data
-
-from molecular_graph import ConstructMolecularGraph
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-class MessagePassing(nn.Module):
-    
-    def __init__(self, node_dim, edge_dim,T):
-        super(MessagePassing, self).__init__()
-        self.node_dim= node_dim
-        self.edge_dim = edge_dim
-
-        self.T = T
-
-        self.U_0 = nn.Linear(2*self.node_dim + self.edge_dim,self.node_dim)
-        self.U_1 = nn.Linear(2*self.node_dim + self.edge_dim,self.node_dim)
-        self.U_2 = nn.Linear(2*self.node_dim + self.edge_dim,self.node_dim)
-        
-        self.M_0 = nn.Linear(2*self.node_dim , self.node_dim)
-        self.M_1 = nn.Linear(2*self.node_dim , self.node_dim)
-        self.M_2 = nn.Linear(2*self.node_dim , self.node_dim)
+import numpy as np
+import math
 
 
-    def message_pass(self,g,h,k):
-        message_list = []
-        for v in g.keys():
-            neighbors = g[v]
-            reshaped_list = []
-            for neighbor in neighbors:
-                e_vw = neighbor[0] # feature variable
-                w = neighbor[1]
-                reshaped = torch.cat((h[v].view(1,-1), h[w].view(1,-1), e_vw.view(1,-1)), 1)
-                if k == 0:
-                    reshaped_list.append(self.U_0(reshaped))
-                elif k == 1:
-                    reshaped_list.append(self.U_1(reshaped))
-                elif k == 2:
-                    reshaped_list.append(self.U_2(reshaped))
-            message_list.append(torch.sum(torch.stack(reshaped_list),0))
-        
-        i = 0
-        for v in g.keys():
-            if k == 0:
-                h[v] = F.relu(self.M_0(torch.cat([h[v].view(1,-1),message_list[i]],1)))
-            elif k == 1:
-                h[v] = F.relu(self.M_1(torch.cat([h[v].view(1,-1),message_list[i]],1)))
-            elif k == 2:
-                h[v] = F.relu(self.M_2(torch.cat([h[v].view(1,-1),message_list[i]],1)))
-            i += 1
-                
-    def forward(self,edge_features, node_features):
-        self.edge_features = edge_features
-        self.node_features =  node_features
-        for k in range(0,self.T):
-            self.message_pass(self.edge_features,self.node_features,k)
-        
-        return self.edge_features,self.node_features
+class GraphTransformerLayer(nn.Module):
+    def __init__(self, in_dim, out_dim, num_heads=6, dropout=0.1):
+        super(GraphTransformerLayer, self).__init__()
+        assert out_dim % num_heads == 0
+        self.num_heads = num_heads
+        self.head_dim = out_dim // num_heads
 
-class ReadoutLayer(nn.Module):
-    def __init__(self, node_dim, edge_dim,mem_dim):
-        super(ReadoutLayer, self).__init__()
-        self.edge_dim = edge_dim
-        self.node_dim =  node_dim
-        self.mem_dim =  mem_dim
-        self.transform_layer = nn.Linear(2*node_dim,2*node_dim)
-        
-    def forward(self,v0,v1):
+        self.q_proj = nn.Linear(in_dim, out_dim)
+        self.k_proj = nn.Linear(in_dim, out_dim)
+        self.v_proj = nn.Linear(in_dim, out_dim)
+        self.out_proj = nn.Linear(out_dim, out_dim)
 
-        catted_reads = torch.cat([v0,v1], 1)
-        activated_reads = F.relu( self.transform_layer (catted_reads))
-        readout = torch.zeros(1, 2*self.node_dim).to(device)
+        self.edge_encoder = nn.Linear(10, num_heads)
+        self.dropout = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(out_dim)
+        self.norm2 = nn.LayerNorm(out_dim)
 
-        for read in activated_reads:
-            readout = readout + read
+        self.ffn = nn.Sequential(
+            nn.Linear(out_dim, 4 * out_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * out_dim, out_dim),
+            nn.Dropout(dropout)
+        )
 
-        return readout
+    def forward(self, g, node_feat, edge_feat=None):
+        N = node_feat.size(0)
+        Q = self.q_proj(node_feat).view(N, self.num_heads, self.head_dim)
+        K = self.k_proj(node_feat).view(N, self.num_heads, self.head_dim)
+        V = self.v_proj(node_feat).view(N, self.num_heads, self.head_dim)
 
-class Cigin(nn.Module):
-    def __init__(self, node_dim=40, edge_dim=10, T=3):
-        super(Cigin, self).__init__()
-        
-        self.node_dim = node_dim
-        self.edge_dim = edge_dim
-        self.T = T
-        self.LSTM_t = 2
-        self.solute_pass = MessagePassing(self.node_dim, self.edge_dim, self.T)
-        self.solvent_pass = MessagePassing(self.node_dim, self.edge_dim, self.T)
+        scores = torch.einsum('ihd,jhd->ijh', Q, K) / math.sqrt(self.head_dim)
 
-        self.lstm_solute = torch.nn.LSTM(2*self.node_dim,self.node_dim)
-        self.lstm_solvent = torch.nn.LSTM(2*self.node_dim,self.node_dim)
-        
-        self.lstm_gather_solute = torch.nn.LSTM(2*2*2*self.node_dim,2*2*self.node_dim)
-        self.lstm_gather_solvent = torch.nn.LSTM(2*2*2*self.node_dim,2*2*self.node_dim)
-        
-        self.first_layer = nn.Linear(16*self.node_dim,360)
-        self.second_layer = nn.Linear(360,200)
-        self.third_layer = nn.Linear(200,120)
-        self.fourth_layer = nn.Linear(120,1)
-    
-    def set2set(self,tensor,no_of_features,no_of_steps,lstm):
-        ##### input format ########   no_of_atoms X timesteps X lengthof feature vector
-        n = tensor.shape[0]
-        tensor=tensor.transpose(0,1)
-        q_star = torch.zeros(n,2*no_of_features).to(device)
-        hidden = (torch.zeros(1, n, no_of_features).to(device),
-              torch.zeros(1, n, no_of_features).to(device))
-        for i in range(no_of_steps):
-            q,hidden = lstm(q_star.unsqueeze(0),hidden)
-            e = torch.sum(tensor*q,2)
-            a = F.softmax(e,dim=0)
-            r = a.unsqueeze(2)*tensor
-            r=  torch.sum(r,0)
-            q_star = torch.cat([q.squeeze(0),r],1)
-        return q_star
+        if edge_feat is not None:
+            src, dst = g.edges()
+            edge_bias = self.edge_encoder(edge_feat).view(-1, self.num_heads)
+            bias_matrix = torch.zeros(N, N, self.num_heads, device=scores.device)
+            bias_matrix[src, dst] = edge_bias
+            scores += bias_matrix
 
-    
-    def forward(self,solute,solvent):
-        
-        #Construct molecular graph for solute.
-        solute = Chem.MolFromSmiles(solute)
-        solute = Chem.AddHs(solute)
-        solute = Chem.MolToSmiles(solute)        
-        edges_solute_0, nodes_solute_0 = ConstructMolecularGraph(solute)
-        self.edges_solute_0 = deepcopy(edges_solute_0)
-        self.nodes_solute_0 =  deepcopy(nodes_solute_0)
-        
-        #Message Passing for solute
-        self.edges_solute_t, self.nodes_solute_t = self.solute_pass(edges_solute_0,nodes_solute_0)
-        
-        #Gather phase for solute
-        self.node_features_0 = torch.stack([self.nodes_solute_0[i] for i in self.nodes_solute_0]).reshape(len(self.nodes_solute_0),self.node_dim)
-        self.node_features_t = torch.stack([self.nodes_solute_t[i] for i in self.nodes_solute_t]).reshape(len(self.nodes_solute_0),self.node_dim)
-        set2set_input_solute = torch.stack([self.node_features_0,self.node_features_t],1)
-        gather_solute = self.set2set(set2set_input_solute,self.node_dim,self.LSTM_t,self.lstm_solute) #A
-        
-        
-        #Construct molecular graph for solute.
-        solvent = Chem.MolFromSmiles(solvent)
-        solvent = Chem.AddHs(solvent)
-        solvent = Chem.MolToSmiles(solvent)
-        edges_solvent_0, nodes_solvent_0 = ConstructMolecularGraph(solvent)
-        self.edges_solvent_0 = deepcopy(edges_solvent_0)
-        self.nodes_solvent_0 = deepcopy(nodes_solvent_0)
-        
-        #Message passing for solvent
-        self.edges_solvent_t, self.nodes_solvent_t = self.solvent_pass(edges_solvent_0,nodes_solvent_0)
+        adj_mask = torch.zeros(N, N, device=scores.device)
+        if g.number_of_edges() > 0:
+            src, dst = g.edges()
+            adj_mask[src, dst] = 1
+            adj_mask[dst, src] = 1
+        adj_mask.fill_diagonal_(1)
+
+        scores = scores.masked_fill(adj_mask.unsqueeze(-1) == 0, float('-inf'))
+        attn_weights = F.softmax(scores, dim=1)
+        attn_weights = self.dropout(attn_weights)
+
+        out = torch.einsum('ijh,jhd->ihd', attn_weights, V).contiguous().view(N, -1)
+        out = self.out_proj(out)
+        out = self.norm1(out + node_feat)
+        out = self.norm2(out + self.ffn(out))
+        return out
 
 
-        #Gather phase for solvent
-        self.node_features_0 = torch.stack([self.nodes_solvent_0[i] for i in self.nodes_solvent_0]).reshape(len(self.nodes_solvent_0),self.node_dim)
-        self.node_features_t = torch.stack([self.nodes_solvent_t[i] for i in self.nodes_solvent_t]).reshape(len(self.nodes_solvent_0),self.node_dim)
-        set2set_input_solvent = torch.stack([self.node_features_0,self.node_features_t],1)
-        gather_solvent = self.set2set(set2set_input_solvent,self.node_dim,self.LSTM_t,self.lstm_solvent) #B
-        
-        #Interaction phase
-        
-        combined_features_no_of_features=2*self.node_dim
-        n = len(self.nodes_solute_t) # no of atoms in solute
-        m = len(self.nodes_solvent_t) # no of atoms in solvent
-        
-        interaction_map = torch.zeros(n,m)
-        interaction_map_2 = torch.zeros(n,m)
-        
-        for i,solute_row in enumerate(gather_solute):
-            for j,solvent_row in enumerate(gather_solvent):
-                interaction_map[i, j] = torch.sum(torch.mul(solute_row, solvent_row))
-                interaction_map_2[i, j] = torch.sum(torch.mul(solute_row, solvent_row))
+class GraphTransformerGatherModel(nn.Module):
+    def __init__(self, node_input_dim, edge_input_dim, hidden_dim, num_heads=6, steps=6):
+        super(GraphTransformerGatherModel, self).__init__()
+        self.input_proj = nn.Linear(node_input_dim, hidden_dim)
+        self.layers = nn.ModuleList([
+            GraphTransformerLayer(hidden_dim, hidden_dim, num_heads)
+            for _ in range(steps)
+        ])
 
-        
-        interaction_map_2 = torch.tanh(interaction_map_2) #I
-        
-        
-        solute_after_interaction = torch.mm(interaction_map_2, gather_solvent) #A'
-        solvent_after_interaction = torch.mm(interaction_map_2.t(), gather_solute) #B'
+    def forward(self, g, node_feat, edge_feat):
+        h = F.relu(self.input_proj(node_feat))
+        init = h.clone()
+        for layer in self.layers:
+            h = layer(g, h, edge_feat)
+        return h + init
 
-        #Prediction phase
-        combined_features_solute_features = self.set2set(torch.cat([solute_after_interaction, gather_solute],1).unsqueeze(0),
-                                     2*combined_features_no_of_features,2,self.lstm_gather_solute) #A''
-        combined_features_solvent_features = self.set2set(torch.cat([solvent_after_interaction, gather_solvent],1).unsqueeze(0),
-                                      2*combined_features_no_of_features,2,self.lstm_gather_solvent) #B''
-        
-        combined_features = torch.cat([combined_features_solute_features,combined_features_solvent_features], 1)
-        combined_features = F.relu(self.first_layer(combined_features))
-        combined_features = F.relu(self.second_layer(combined_features))
-        combined_features = F.relu(self.third_layer(combined_features))
-        combined_features = self.fourth_layer(combined_features)
-        
-        return combined_features, interaction_map.detach()
-        
+
+class GraphTransformerPooling(nn.Module):
+    def __init__(self, in_dim, out_dim, num_heads=6):
+        super(GraphTransformerPooling, self).__init__()
+        self.attn = nn.MultiheadAttention(embed_dim=in_dim, num_heads=num_heads, batch_first=True)
+        self.query = nn.Parameter(torch.randn(1, 1, in_dim))
+        self.proj = nn.Linear(in_dim, out_dim)
+
+    def forward(self, g, node_feat):
+        batch_sizes = g.batch_num_nodes().tolist() if hasattr(g, 'batch_num_nodes') else [node_feat.size(0)]
+        outputs = []
+        start = 0
+        for size in batch_sizes:
+            segment = node_feat[start:start + size].unsqueeze(0)
+            q = self.query.expand(1, -1, -1)
+            pooled, _ = self.attn(q, segment, segment)
+            outputs.append(pooled.squeeze(0).squeeze(0))
+            start += size
+        return self.proj(torch.stack(outputs, 0))
+
+
+class CIGINGraphTransformerModel(nn.Module):
+    def __init__(self, node_dim=42, edge_dim=10, heads=6, steps=6):
+        super(CIGINGraphTransformerModel, self).__init__()
+        self.solute_gather = GraphTransformerGatherModel(node_dim, edge_dim, node_dim, heads, steps)
+        self.solvent_gather = GraphTransformerGatherModel(node_dim, edge_dim, node_dim, heads, steps)
+
+        self.solute_pool = GraphTransformerPooling(2 * node_dim, 4 * node_dim, heads)
+        self.solvent_pool = GraphTransformerPooling(2 * node_dim, 4 * node_dim, heads)
+
+        self.imap = nn.Linear(2 * node_dim, 1)
+        self.fc1 = nn.Linear(8 * node_dim, 256)
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128, 1)
+
+    def forward(self, data):
+        solute, solvent, len_solu, len_solvent = data
+        h_solu = self.solute_gather(solute, solute.ndata['x'].float(), solute.edata['w'].float())
+        h_solv = self.solvent_gather(solvent, solvent.ndata['x'].float(), solvent.edata['w'].float())
+
+        interaction = torch.mm(h_solu, h_solv.t())
+        interaction = torch.tanh(interaction)
+
+        solute_prime = torch.mm(interaction, h_solv)
+        solvent_prime = torch.mm(interaction.t(), h_solu)
+
+        h_solu = torch.cat([h_solu, solute_prime], dim=1)
+        h_solv = torch.cat([h_solv, solvent_prime], dim=1)
+
+        pooled_solu = self.solute_pool(solute, h_solu)
+        pooled_solv = self.solvent_pool(solvent, h_solv)
+
+        final = torch.cat([pooled_solu, pooled_solv], 1)
+        x = F.relu(self.fc1(final))
+        x = F.relu(self.fc2(x))
+        return self.fc3(x), interaction
