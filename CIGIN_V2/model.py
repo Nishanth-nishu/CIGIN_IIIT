@@ -101,7 +101,7 @@ class CIGINModel(nn.Module):
             solvent_features = self.solvent_gather(solvent, solvent.ndata['x'].float(), None)
 
         # Interaction phase
-        len_map = torch.mm(solute_len.t(), solvent_len)
+        len_map = torch.mm(solute_len, solvent_len.t())
 
         if 'dot' not in self.interaction:
             X1 = solute_features.unsqueeze(0)
