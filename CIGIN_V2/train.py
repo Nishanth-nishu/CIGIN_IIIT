@@ -1,132 +1,73 @@
-import torch
-import torch.nn as nn
 from tqdm import tqdm
-import wandb
-import logging
-import os
+import torch
+import numpy as np
 
-# Loss functions
-mae_criterion = nn.L1Loss()
-mse_criterion = nn.MSELoss()
+loss_fn = torch.nn.MSELoss()
+mae_loss_fn = torch.nn.L1Loss()
 
-# ---------------- Logger Setup ----------------
-def initialize_logger(log_file="training.log"):
-    logging.basicConfig(
-        filename=log_file,
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        filemode='w'
-    )
-    logging.getLogger().addHandler(logging.StreamHandler())
+use_cuda = torch.cuda.is_available()
+device = torch.device("cuda" if use_cuda else "cpu")
 
-def log_metrics_to_file(epoch, train_loss, train_mae, val_loss, val_mae):
-    logging.info(f"Epoch {epoch}:")
-    logging.info(f"  Train Loss: {train_loss:.4f}, MAE: {train_mae:.4f}")
-    logging.info(f"  Val   Loss: {val_loss:.4f}, MAE: {val_mae:.4f}")
+def evaluate_model(model, dataloader):
+    model.eval()
+    preds, targets = [], []
+    with torch.no_grad():
+        for samples in dataloader:
+            outputs, _ = model([samples[0].to(device), samples[1].to(device),
+                                samples[2].to(device), samples[3].to(device)])
+            preds.extend(outputs.cpu().numpy())
+            targets.extend(samples[4].numpy())
+    preds, targets = np.array(preds), np.array(targets)
+    rmse = np.sqrt(np.mean((preds - targets) ** 2))
+    return rmse
 
-def log_metrics_to_wandb(epoch, train_loss, train_mae, val_loss, val_mae):
-    wandb.log({
-        "Epoch": epoch,
-        "Train Loss": train_loss,
-        "Train MAE": train_mae,
-        "Val Loss": val_loss,
-        "Val MAE": val_mae
-    })
+def get_metrics(model, data_loader):
+    valid_outputs = []
+    valid_labels = []
+    valid_loss = []
+    valid_mae_loss = []
+    for solute_graphs, solvent_graphs, solute_lens, solvent_lens, labels in data_loader:
+        outputs, i_map = model(
+            [solute_graphs.to(device), solvent_graphs.to(device), torch.tensor(solute_lens).to(device),
+             torch.tensor(solvent_lens).to(device)])
+        loss = loss_fn(outputs, torch.tensor(labels).to(device).float())
+        mae_loss = mae_loss_fn(outputs, torch.tensor(labels).to(device).float())
+        valid_outputs += outputs.cpu().detach().numpy().tolist()
+        valid_loss.append(loss.cpu().detach().numpy())
+        valid_mae_loss.append(mae_loss.cpu().detach().numpy())
+        valid_labels += labels
 
-# ---------------- Training Function ----------------
-def train(max_epochs, model, optimizer, scheduler, train_loader, val_loader, project_name):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
+    loss = np.mean(np.array(valid_loss).flatten())
+    mae_loss = np.mean(np.array(valid_mae_loss).flatten())
+    return loss, mae_loss
 
-    wandb.init(project=project_name)
-    wandb.watch(model)
 
-    best_val_loss = float("inf")
-    best_epoch = -1
-
-    for epoch in range(1, max_epochs + 1):
+def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name):
+    best_val_loss = 100
+    for epoch in range(max_epochs):
         model.train()
-        epoch_loss = 0.0
-        epoch_mae = 0.0
-
-        progress = tqdm(train_loader, desc=f"Epoch {epoch}/{max_epochs}")
-        for batch in progress:
-            try:
-                batch = [item.to(device) if hasattr(item, 'to') else item for item in batch]
-                outputs, interaction_map = model(batch)
-
-                labels = batch[-1].to(device)
-
-                loss = mse_criterion(outputs, labels)
-                mae = mae_criterion(outputs, labels)
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                epoch_loss += loss.item()
-                epoch_mae += mae.item()
-            except Exception as e:
-                logging.error(f"Error in training batch: {e}")
-                continue
-
-        avg_train_loss = epoch_loss / len(train_loader)
-        avg_train_mae = epoch_mae / len(train_loader)
-
-        # Validation
-        val_loss, val_mae = evaluate_model(model, val_loader, device)
-
-        # Scheduler step
+        running_loss = []
+        tq_loader = tqdm(train_loader)
+        o = {}
+        for samples in tq_loader:
+            optimizer.zero_grad()
+            outputs, interaction_map = model(
+                [samples[0].to(device), samples[1].to(device), torch.tensor(samples[2]).to(device),
+                 torch.tensor(samples[3]).to(device)])
+            l1_norm = torch.norm(interaction_map, p=2) * 1e-4
+            loss = loss_fn(outputs, torch.tensor(samples[4]).to(device).float()) + l1_norm
+            loss.backward()
+            optimizer.step()
+            loss = loss - l1_norm
+            running_loss.append(loss.cpu().detach())
+            tq_loader.set_description(
+                "Epoch: " + str(epoch + 1) + "  Training loss: " + str(np.mean(np.array(running_loss))))
+        model.eval()
+        val_loss, mae_loss = get_metrics(model, valid_loader)
         scheduler.step(val_loss)
-
-        # Logging
-        log_metrics_to_file(epoch, avg_train_loss, avg_train_mae, val_loss, val_mae)
-        log_metrics_to_wandb(epoch, avg_train_loss, avg_train_mae, val_loss, val_mae)
-
-        # Save best model
+        print("Epoch: " + str(epoch + 1) + "  train_loss " + str(np.mean(np.array(running_loss))) + " Val_loss " + str(
+            val_loss) + " MAE Val_loss " + str(mae_loss))
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_epoch = epoch
-            torch.save(model.state_dict(), f"{project_name}_best_model.pth")
+            torch.save(model.state_dict(), "./runs/run-" + str(project_name) + "/models/best_model.tar")
 
-        logging.info(f"Finished Epoch {epoch}: Train Loss={avg_train_loss:.4f}, Val Loss={val_loss:.4f}")
-
-    logging.info(f"Training complete. Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}")
-
-# ---------------- Evaluation Functions ----------------
-def evaluate_model(model, data_loader, device, return_predictions=False):
-    model.eval()
-    total_loss = 0.0
-    total_mae = 0.0
-    predictions = []
-    ground_truth = []
-
-    with torch.no_grad():
-        for batch in data_loader:
-            try:
-                batch = [item.to(device) if hasattr(item, 'to') else item for item in batch]
-                outputs, _ = model(batch)
-                labels = batch[-1].to(device)
-
-                loss = mse_criterion(outputs, labels)
-                mae = mae_criterion(outputs, labels)
-
-                total_loss += loss.item()
-                total_mae += mae.item()
-
-                if return_predictions:
-                    predictions.append(outputs.cpu())
-                    ground_truth.append(labels.cpu())
-            except Exception as e:
-                logging.error(f"Error in validation batch: {e}")
-                continue
-
-    avg_loss = total_loss / len(data_loader)
-    avg_mae = total_mae / len(data_loader)
-
-    if return_predictions:
-        return avg_loss, avg_mae, torch.cat(predictions), torch.cat(ground_truth)
-    return avg_loss, avg_mae
-
-def get_metrics(model, data_loader, device, return_predictions=False):
-    return evaluate_model(model, data_loader, device, return_predictions)
