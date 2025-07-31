@@ -2,6 +2,8 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from sklearn.model_selection import train_test_split
+
 from models import Cigin
 from molecular_graph import ConstructMolecularGraph
 from train import train
@@ -18,7 +20,7 @@ class MNSolVDataset(Dataset):
     def __getitem__(self, idx):
         solute = self.data.iloc[idx]['SoluteSMILES']
         solvent = self.data.iloc[idx]['SolventSMILES']
-        deltaG = self.data.iloc[idx]['DeltaGsolv']
+        deltaG = self.data.iloc[idx]['delGsolv']
         return solute, solvent, deltaG
 
 def collate_fn(batch):
@@ -36,10 +38,15 @@ def collate_fn(batch):
 
     return solute_graphs, solvent_graphs, labels
 
-
 def main():
-    train_df = pd.read_csv("data/train.csv", sep=";")
-    valid_df = pd.read_csv("data/valid.csv", sep=";")
+    # Load and preprocess full dataset
+    df = pd.read_csv('https://raw.githubusercontent.com/adithyamauryakr/CIGIN-DevaLab/refs/heads/master/CIGIN_V2/data/whole_data.csv')
+    df.columns = df.columns.str.strip()
+    print("Dataset columns:", df.columns)
+
+    # Split: 10% test, then 10% of remaining for validation
+    train_df, test_df = train_test_split(df, test_size=0.1, random_state=42)
+    train_df, valid_df = train_test_split(train_df, test_size=0.111, random_state=42)
 
     train_set = MNSolVDataset(train_df)
     valid_set = MNSolVDataset(valid_df)
