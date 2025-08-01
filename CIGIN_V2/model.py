@@ -1,5 +1,4 @@
 import numpy as np
-import math
 
 from dgl import DGLGraph
 from dgl.nn.pytorch import Set2Set, NNConv, GATConv
@@ -8,10 +7,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+
 class GatherModel(nn.Module):
     """
-    Original MPNN from CIGIN paper (unchanged)
+    MPNN from
+    `Neural Message Passing for Quantum Chemistry <https://arxiv.org/abs/1704.01212>`
+    Parameters
+    ----------
+    node_input_dim : int
+        Dimension of input node feature, default to be 42.
+    edge_input_dim : int
+        Dimension of input edge feature, default to be 10.
+    node_hidden_dim : int
+        Dimension of node feature in hidden layers, default to be 42.
+    edge_hidden_dim : int
+        Dimension of edge feature in hidden layers, default to be 128.
+    num_step_message_passing : int
+        Number of message passing steps, default to be 6.
     """
+
     def __init__(self,
                  node_input_dim=42,
                  edge_input_dim=10,
@@ -35,20 +50,38 @@ class GatherModel(nn.Module):
                            )
 
     def forward(self, g, n_feat, e_feat):
+        """Returns the node embeddings after message passing phase.
+        Parameters
+        ----------
+        g : DGLGraph
+            Input DGLGraph for molecule(s)
+        n_feat : tensor of dtype float32 and shape (B1, D1)
+            Node features. B1 for number of nodes and D1 for
+            the node feature size.
+        e_feat : tensor of dtype float32 and shape (B2, D2)
+            Edge features. B2 for number of edges and D2 for
+            the edge feature size.
+        Returns
+        -------
+        res : node features
+        """
+
         init = n_feat.clone()
         out = F.relu(self.lin0(n_feat))
         for i in range(self.num_step_message_passing):
             if e_feat is not None:
                 m = torch.relu(self.conv(g, out, e_feat))
             else:
-                m = torch.relu(self.conv.bias + self.conv.res_fc(out))
+                m = torch.relu(self.conv.bias +  self.conv.res_fc(out))
             out = self.message_layer(torch.cat([m, out], dim=1))
         return out + init
 
+
 class CIGINModel(nn.Module):
     """
-    Original CIGIN model (unchanged)
+    This the main class for CIGIN model
     """
+
     def __init__(self,
                  node_input_dim=42,
                  edge_input_dim=10,
@@ -75,7 +108,7 @@ class CIGINModel(nn.Module):
                                           self.node_hidden_dim, self.edge_input_dim,
                                           self.num_step_message_passing,
                                           )
-        # These three are the FFNN for prediction phase
+
         self.fc1 = nn.Linear(8 * self.node_hidden_dim, 256)
         self.fc2 = nn.Linear(256, 128)
         self.fc3 = nn.Linear(128, 1)
