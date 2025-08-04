@@ -8,9 +8,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import numpy as np
+import math
+
+from dgl import DGLGraph
+from dgl.nn.pytorch import Set2Set, NNConv, GATConv
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 class GatherModel(nn.Module):
     """
-    Original MPNN from CIGIN paper (unchanged)
+    MPNN with Set2Set gather function matching the reference implementation
     """
     def __init__(self,
                  node_input_dim=42,
@@ -21,8 +33,10 @@ class GatherModel(nn.Module):
                  ):
         super(GatherModel, self).__init__()
         self.num_step_message_passing = num_step_message_passing
+        self.node_hidden_dim = node_hidden_dim
+        
+        # Original message passing components
         self.lin0 = nn.Linear(node_input_dim, node_hidden_dim)
-        self.set2set = Set2Set(node_hidden_dim, 2, 1)
         self.message_layer = nn.Linear(2 * node_hidden_dim, node_hidden_dim)
         edge_network = nn.Sequential(
             nn.Linear(edge_input_dim, edge_hidden_dim), nn.ReLU(),
@@ -33,9 +47,37 @@ class GatherModel(nn.Module):
                            aggregator_type='sum',
                            residual=True
                            )
+        
+        # Set2Set gather function components (matching reference code)
+        self.LSTM_t = 2  # number of steps for set2set
+        self.lstm_gather = torch.nn.LSTM(2 * self.node_hidden_dim, self.node_hidden_dim)
+
+    def set2set(self, tensor, no_of_features, no_of_steps, lstm):
+        """
+        Exact implementation from reference code
+        Input format: no_of_atoms X timesteps X length_of_feature_vector
+        """
+        n = tensor.shape[0]
+        tensor = tensor.transpose(0, 1)  # [timesteps, num_atoms, features]
+        q_star = torch.zeros(n, 2 * no_of_features).to(device)
+        hidden = (torch.zeros(1, n, no_of_features).to(device),
+                  torch.zeros(1, n, no_of_features).to(device))
+        
+        for i in range(no_of_steps):
+            q, hidden = lstm(q_star.unsqueeze(0), hidden)
+            e = torch.sum(tensor * q, 2)
+            a = F.softmax(e, dim=0)
+            r = a.unsqueeze(2) * tensor
+            r = torch.sum(r, 0)
+            q_star = torch.cat([q.squeeze(0), r], 1)
+        
+        return q_star
 
     def forward(self, g, n_feat, e_feat):
+        # Store initial features (x_v)
         init = n_feat.clone()
+        
+        # Message passing phase
         out = F.relu(self.lin0(n_feat))
         for i in range(self.num_step_message_passing):
             if e_feat is not None:
@@ -43,18 +85,30 @@ class GatherModel(nn.Module):
             else:
                 m = torch.relu(self.conv.bias + self.conv.res_fc(out))
             out = self.message_layer(torch.cat([m, out], dim=1))
-        return out + init
+        
+        # Gather phase using Set2Set (matching reference implementation)
+        # Combine initial features (init) and final features (out)
+        node_features_0 = init  # Initial features [num_atoms, node_dim]
+        node_features_t = out   # Final features [num_atoms, node_dim]
+        
+        # Stack initial and final features: [num_atoms, 2, node_dim]
+        set2set_input = torch.stack([node_features_0, node_features_t], 1)
+        
+        # Apply Set2Set gather function
+        gathered_features = self.set2set(set2set_input, self.node_hidden_dim, self.LSTM_t, self.lstm_gather)
+        
+        return gathered_features  # Shape: [num_atoms, 2*node_hidden_dim]
 
 class CIGINModel(nn.Module):
     """
-    Original CIGIN model (unchanged)
+    CIGIN model with Set2Set gather function
     """
     def __init__(self,
                  node_input_dim=42,
                  edge_input_dim=10,
                  node_hidden_dim=42,
                  edge_hidden_dim=42,
-                 num_step_message_passing=6,
+                 num_step_message_passing=3,
                  interaction='dot',
                  num_step_set2_set=2,
                  num_layer_set2set=1,
@@ -67,6 +121,8 @@ class CIGINModel(nn.Module):
         self.edge_hidden_dim = edge_hidden_dim
         self.num_step_message_passing = num_step_message_passing
         self.interaction = interaction
+        
+        # Use the new GatherModel with Set2Set
         self.solute_gather = GatherModel(self.node_input_dim, self.edge_input_dim,
                                          self.node_hidden_dim, self.edge_input_dim,
                                          self.num_step_message_passing,
@@ -75,7 +131,11 @@ class CIGINModel(nn.Module):
                                           self.node_hidden_dim, self.edge_input_dim,
                                           self.num_step_message_passing,
                                           )
-        # These three are the FFNN for prediction phase
+        
+        # Adjust the first layer input dimension to account for Set2Set output
+        # Set2Set outputs 2*node_hidden_dim per molecule, so total is 4*node_hidden_dim for interaction
+        # After interaction, we concatenate: 2*node_hidden_dim + 2*node_hidden_dim = 4*node_hidden_dim per molecule
+        # Total for both molecules: 8*node_hidden_dim (this matches the original)
         self.fc1 = nn.Linear(8 * self.node_hidden_dim, 256)
         self.fc2 = nn.Linear(256, 128)
         self.fc3 = nn.Linear(128, 1)
@@ -83,15 +143,20 @@ class CIGINModel(nn.Module):
 
         self.num_step_set2set = num_step_set2_set
         self.num_layer_set2set = num_layer_set2set
-        self.set2set_solute = Set2Set(2 * node_hidden_dim, self.num_step_set2set, self.num_layer_set2set)
-        self.set2set_solvent = Set2Set(2 * node_hidden_dim, self.num_step_set2set, self.num_layer_set2set)
+        
+        # Set2Set for final pooling (readout layers R)
+        # Input is now 4*node_hidden_dim (2*node_hidden_dim original + 2*node_hidden_dim interaction)
+        self.set2set_solute = Set2Set(4 * node_hidden_dim, self.num_step_set2set, self.num_layer_set2set)
+        self.set2set_solvent = Set2Set(4 * node_hidden_dim, self.num_step_set2set, self.num_layer_set2set)
 
     def forward(self, data):
         solute = data[0]
         solvent = data[1]
         solute_len = data[2]
         solvent_len = data[3]
-        # node embeddings after interaction phase
+        
+        # Node embeddings with Set2Set gather function
+        # Output shape: [num_atoms, 2*node_hidden_dim]
         solute_features = self.solute_gather(solute, solute.ndata['x'].float(), solute.edata['w'].float())
         try:
             # if edge exists in a molecule
@@ -100,7 +165,7 @@ class CIGINModel(nn.Module):
             # if edge doesn't exist in a molecule, for example in case of water
             solvent_features = self.solvent_gather(solvent, solvent.ndata['x'].float(), None)
 
-        # Interaction phase
+        # Interaction phase (same as original)
         len_map = torch.mm(solute_len.t(), solvent_len)
 
         if 'dot' not in self.interaction:
@@ -121,23 +186,27 @@ class CIGINModel(nn.Module):
         elif 'dot' in self.interaction:
             interaction_map = torch.mm(solute_features, solvent_features.t())
             if 'scaled' in self.interaction:
-                interaction_map = interaction_map / (np.sqrt(self.node_hidden_dim))
+                interaction_map = interaction_map / (np.sqrt(2 * self.node_hidden_dim))  # Update for new feature size
 
             ret_interaction_map = torch.clone(interaction_map)
             ret_interaction_map = torch.mul(len_map.float(), ret_interaction_map)
             interaction_map = torch.tanh(interaction_map)
             interaction_map = torch.mul(len_map.float(), interaction_map)
 
+        # Interaction calculations (A' = IB, B' = I^T A)
         solvent_prime = torch.mm(interaction_map.t(), solute_features)
         solute_prime = torch.mm(interaction_map, solvent_features)
 
         # Prediction phase
-        solute_features = torch.cat((solute_features, solute_prime), dim=1)
-        solvent_features = torch.cat((solvent_features, solvent_prime), dim=1)
+        # Concatenate original features with interaction features
+        solute_features = torch.cat((solute_features, solute_prime), dim=1)  # [num_atoms, 4*node_hidden_dim]
+        solvent_features = torch.cat((solvent_features, solvent_prime), dim=1)  # [num_atoms, 4*node_hidden_dim]
 
+        # Apply Set2Set readout layers (R functions from paper)
         solute_features = self.set2set_solute(solute, solute_features)
         solvent_features = self.set2set_solvent(solvent, solvent_features)
 
+        # Final prediction
         final_features = torch.cat((solute_features, solvent_features), 1)
         predictions = torch.relu(self.fc1(final_features))
         predictions = torch.relu(self.fc2(predictions))
