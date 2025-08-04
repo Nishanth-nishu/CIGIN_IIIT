@@ -22,7 +22,7 @@ import torch
 import dgl
 
 # local imports
-from model import CIGINModel, CIGINGraphTransformerModel
+from model import CIGINModel
 from train import train, get_metrics
 from molecular_graph import get_graph_from_smile
 from utils import *
