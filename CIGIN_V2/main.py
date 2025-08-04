@@ -190,7 +190,6 @@ def main():
                   f"{r['test_mae']:<10.4f} {r['test_rmse']:<10.4f} {r['training_time']/60:<10.2f}")
 
         orig = next(r for r in results if 'Original' in r['model_name'])
-        trans = next(r for r in results if 'GraphTransformer' in r['model_name'])
 
         print(f"\nImprovement Analysis:")
         print(f"- Parameters: {trans['parameters']/orig['parameters']:.2f}x")
