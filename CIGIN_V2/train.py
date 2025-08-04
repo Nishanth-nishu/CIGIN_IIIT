@@ -4,12 +4,11 @@ import numpy as np
 import os
 
 class EnhancedTrainer:
-    def __init__(self, device=None, mean=0.0, std=1.0):
+    def __init__(self, device=None):
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.mse_loss = torch.nn.MSELoss()
         self.mae_loss = torch.nn.L1Loss()
-        self.mean = mean
-        self.std = std
+
         
     def compute_metrics(self, model, data_loader):
         model.eval()
@@ -56,7 +55,7 @@ class EnhancedTrainer:
             epoch_loss += loss.item()
         return epoch_loss / len(train_loader)
 
-def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name, mean=0.0, std=1.0):
+def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name):
     trainer = EnhancedTrainer(mean=mean, std=std)
     best_val_loss = float('inf')
     save_dir = f"./runs/run-{project_name}/models"
@@ -83,6 +82,6 @@ def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, p
             }, save_path)
             print(f"Saved new best model to {save_path}")
 
-def get_metrics(model, data_loader, mean=0.0, std=1.0):
-    trainer = EnhancedTrainer(mean=mean, std=std)
+def get_metrics(model, data_loader):
+    trainer = EnhancedTrainer()
     return trainer.compute_metrics(model, data_loader)
