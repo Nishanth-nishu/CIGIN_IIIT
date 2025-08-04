@@ -3,209 +3,284 @@ import pandas as pd
 import warnings
 import os
 import argparse
-import sys
-import traceback
+from sklearn.model_selection import KFold
+import numpy as np
+import time
+
 # rdkit imports
-from rdkit import RDLogger, Chem
+from rdkit import RDLogger
+from rdkit import rdBase
+from rdkit import Chem
+
 # torch imports
 from torch.utils.data import DataLoader, Dataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import torch
-import torch.multiprocessing as mp
+
 # dgl imports
 import dgl
 
 # local imports
-from model import CIGINModel
-from train import train
+from model import CIGINModel, CIGINGraphTransformerModel
+from train import train_cv, get_metrics
 from molecular_graph import get_graph_from_smile
-from utils import get_len_matrix
+from utils import *
 
-# Ensure safe multiprocessing on Windows
-if __name__ == '__main__':
-    try:
-        mp.set_start_method('spawn', force=True)
-    except:
-        pass
-
-# Suppress RDKit warnings
+# Disable RDKit and warning logs
 lg = RDLogger.logger()
 lg.setLevel(RDLogger.CRITICAL)
+rdBase.DisableLog('rdApp.error')
 warnings.filterwarnings("ignore")
 
-# Parse command-line arguments
-parser = argparse.ArgumentParser()
-parser.add_argument('--name', default='cigin', help="Project name")
-parser.add_argument('--interaction', default='dot',
-                    help="Interaction: dot | scaled-dot | general | tanh-general")
-parser.add_argument('--max_epochs', default=100, type=int, help="Max epochs")
-parser.add_argument('--batch_size', default=4, type=int, help="Batch size")
+# Argument parsing
+parser = argparse.ArgumentParser(description='CIGIN Model 10-fold CV with 5 repetitions')
+parser.add_argument('--name', default='cigin_cv', help="Project name (default: cigin_cv)")
+parser.add_argument('--interaction', default='dot', 
+                    choices=['dot', 'scaled-dot', 'general', 'tanh-general'],
+                    help="Interaction function type")
+parser.add_argument('--max_epochs', type=int, default=100,
+                    help="Maximum training epochs (default: 100)")
+parser.add_argument('--batch_size', type=int, default=32,
+                    help="Training batch size (default: 32)")
+parser.add_argument('--model_type', default='both', 
+                    choices=['original', 'transformer', 'both'],
+                    help="Which model(s) to train")
+parser.add_argument('--num_heads', type=int, default=6,
+                    help="Number of attention heads (default: 6)")
+parser.add_argument('--hidden_dim', type=int, default=42,
+                    help="Hidden dimension (default: 42 to match original)")
+parser.add_argument('--lr', type=float, default=0.001,
+                    help="Learning rate (default: 0.001)")
+parser.add_argument('--scheduler_patience', type=int, default=5,
+                    help="LR scheduler patience (default: 5)")
+
 args = parser.parse_args()
 
-project_name = args.name
-interaction = args.interaction
-max_epochs = args.max_epochs
-batch_size = args.batch_size
+# Configuration
+config = {
+    'project_name': args.name,
+    'interaction': args.interaction,
+    'max_epochs': args.max_epochs,
+    'batch_size': args.batch_size,
+    'model_type': args.model_type,
+    'num_heads': args.num_heads,
+    'hidden_dim': args.hidden_dim,
+    'learning_rate': args.lr,
+    'scheduler_patience': args.scheduler_patience,
+    'valid_batch_size': 128,
+    'test_batch_size': 128
+}
 
-# Force CPU for determinism
-device = torch.device("cpu")
-torch.set_num_threads(2)
-print(f"\n📡 Using device: {device}, threads: {torch.get_num_threads()}")
+# Ensure hidden_dim is divisible by num_heads
+if config['hidden_dim'] % config['num_heads'] != 0:
+    config['hidden_dim'] = ((config['hidden_dim'] // config['num_heads']) + 1) * config['num_heads']
+    print(f"Adjusted hidden_dim to {config['hidden_dim']} to be divisible by {config['num_heads']} heads")
 
-# Create run directories if missing
-run_dir = os.path.join("runs", f"run-{project_name}")
-os.makedirs(os.path.join(run_dir, "models"), exist_ok=True)
+# Device configuration
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
-def load_data():
-    """Load datasets from 'data/train.csv' and 'data/valid.csv'."""
-    try:
-        train_csv = os.path.join('data', 'train.csv')
-        valid_csv = os.path.join('data', 'valid.csv')
-        
-        if not os.path.exists(train_csv):
-            print(f"❌ Error: {train_csv} not found")
-            return None, None
-        if not os.path.exists(valid_csv):
-            print(f"⚠️  Warning: {valid_csv} not found—using train.csv for validation")
-            train_df = pd.read_csv(train_csv, sep=';')
-            valid_df = train_df.copy()
-        else:
-            train_df = pd.read_csv(train_csv, sep=';')
-            valid_df = pd.read_csv(valid_csv, sep=';')
-        
-        for col in ['SoluteSMILES', 'SolventSMILES', 'DeltaGsolv']:
-            if col not in train_df:
-                print(f"❌ Error: Column {col} missing in train.csv")
-                return None, None
-            if col not in valid_df:
-                print(f"❌ Error: Column {col} missing in valid.csv")
-                return None, None
-        
-        print(f"➡️  Loaded datasets: train {len(train_df)} rows, valid {len(valid_df)} rows")
-        
-        train_dataset = SafeDataset(train_df)
-        valid_dataset = SafeDataset(valid_df)
-        
-        if len(train_dataset) == 0:
-            print("❌ Error: No valid training samples found.")
-            return None, None
-        if len(valid_dataset) == 0:
-            print("⚠️  Warning: No valid validation samples found—using training data instead.")
-            valid_dataset = train_dataset
-        
-        return train_dataset, valid_dataset
-    
-    except Exception as e:
-        print("❌ Error loading data:", e)
-        traceback.print_exc()
-        return None, None
+# Create output directories
+if not os.path.isdir(f"runs/run-{config['project_name']}"):
+    os.makedirs(f"./runs/run-{config['project_name']}")
+    os.makedirs(f"./runs/run-{config['project_name']}/models")
 
-def safe_collate(samples):
-    """Collate function with validation and fallback."""
-    try:
-        valid = [s for s in samples if s is not None]
-        if not valid:
-            raise ValueError("No valid samples to collate")
-        
-        sol_gs, solv_gs, labels = zip(*valid)
-        
-        sol_valid, solv_valid, valid_labels = [], [], []
-        for i, (sg, vg, lab) in enumerate(zip(sol_gs, solv_gs, labels)):
-            try:
-                if sg is not None and vg is not None \
-                   and 'x' in sg.ndata and 'x' in vg.ndata \
-                   and sg.ndata['x'].shape[1] == 42 \
-                   and vg.ndata['x'].shape[1] == 42:
-                    sol_valid.append(sg)
-                    solv_valid.append(vg)
-                    valid_labels.append(float(lab))
-            except Exception as er:
-                print(f"⚠️  Skipping sample {i}: {er}")
-        
-        if not sol_valid:
-            raise ValueError("No valid graph pairs after filtering")
-        
-        sol_batch = dgl.batch(sol_valid)
-        solv_batch = dgl.batch(solv_valid)
-        
-        sol_sizes = sol_batch.batch_num_nodes().tolist()
-        solv_sizes = solv_batch.batch_num_nodes().tolist()
-        
-        sol_len = get_len_matrix(sol_sizes)
-        solv_len = get_len_matrix(solv_sizes)
-        
-        label_t = torch.tensor(valid_labels, dtype=torch.float32)
-        
-        return sol_batch, solv_batch, sol_len, solv_len, label_t
-    except Exception as e:
-        print("❌ Collate error:", e)
-        traceback.print_exc()
-        raise e
+def collate(samples):
+    """Batch preparation function (identical to original)"""
+    solute_graphs, solvent_graphs, labels = map(list, zip(*samples))
+    solute_graphs = dgl.batch(solute_graphs)
+    solvent_graphs = dgl.batch(solvent_graphs)
+    solute_len_matrix = get_len_matrix(solute_graphs.batch_num_nodes().tolist())
+    solvent_len_matrix = get_len_matrix(solvent_graphs.batch_num_nodes().tolist())
+    return solute_graphs, solvent_graphs, solute_len_matrix, solvent_len_matrix, labels
 
-class SafeDataset(Dataset):
-    def __init__(self, df):
-        self.df = df.reset_index(drop=True)
-        self.valid_indices = []
-        for idx in range(len(self.df)):
-            if self._validate_sample(idx):
-                self.valid_indices.append(idx)
-        print(f"✔️  Valid samples: {len(self.valid_indices)} / {len(self.df)}")
-    
-    def _validate_sample(self, idx):
-        try:
-            row = self.df.iloc[idx]
-            if pd.isna(row['SoluteSMILES']) or pd.isna(row['SolventSMILES']) or pd.isna(row['DeltaGsolv']):
-                return False
-            sg = get_graph_from_smile(str(row['SoluteSMILES']))
-            vg = get_graph_from_smile(str(row['SolventSMILES']))
-            if sg.number_of_nodes()==0 or vg.number_of_nodes()==0:
-                return False
-            if 'x' not in sg.ndata or sg.ndata['x'].shape[1] != 42:
-                return False
-            if 'x' not in vg.ndata or vg.ndata['x'].shape[1] != 42:
-                return False
-            return True
-        except:
-            return False
-    
+class Dataclass(Dataset):
+    """Custom dataset class (identical to original)"""
+    def __init__(self, dataset):
+        self.dataset = dataset
+
     def __len__(self):
-        return len(self.valid_indices)
-    
-    def __getitem__(self, idx):
-        try:
-            real_idx = self.valid_indices[idx]
-            row = self.df.iloc[real_idx]
-            sg = get_graph_from_smile(str(row['SoluteSMILES']))
-            vg = get_graph_from_smile(str(row['SolventSMILES']))
-            return sg, vg, float(row['DeltaGsolv'])
-        except Exception as e:
-            print(f"⚠️  Error on __getitem__ idx={idx}: {e}")
-            return None
+        return len(self.dataset)
 
-def main():
-    print("\n💾 Loading data...")
-    train_ds, valid_ds = load_data()
-    if train_ds is None:
-        return
+    def __getitem__(self, idx):
+        solute = self.dataset.iloc[idx]['SoluteSMILES']
+        mol = Chem.MolFromSmiles(solute)
+        mol = Chem.AddHs(mol)
+        solute = Chem.MolToSmiles(mol)
+        solute_graph = get_graph_from_smile(solute)
+
+        solvent = self.dataset.iloc[idx]['SolventSMILES']
+        mol = Chem.MolFromSmiles(solvent)
+        mol = Chem.AddHs(mol)
+        solvent = Chem.MolToSmiles(mol)
+        solvent_graph = get_graph_from_smile(solvent)
+
+        delta_g = self.dataset.iloc[idx]['delGsolv']
+        return [solute_graph, solvent_graph, [delta_g]]
+
+def run_single_fold(model_class, train_data, val_data, config, fold_id, rep_id):
+    """Run a single fold of cross-validation"""
     
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              collate_fn=safe_collate, num_workers=0, pin_memory=False)
-    valid_loader = DataLoader(valid_ds, batch_size=batch_size, shuffle=False,
-                              collate_fn=safe_collate, num_workers=0, pin_memory=False)
+    # Create fresh model instance
+    if model_class == CIGINModel:
+        model = CIGINModel(
+            interaction=config['interaction'],
+            node_hidden_dim=42
+        )
+    else:
+        model = CIGINGraphTransformerModel(
+            interaction=config['interaction'],
+            node_hidden_dim=config['hidden_dim'],
+            num_heads=config['num_heads']
+        )
     
-    print("\n🧠 Initializing model...")
-    model = CIGINModel(node_input_dim=42, edge_input_dim=10, node_hidden_dim=42,
-                       edge_hidden_dim=42, num_step_message_passing=6,
-                       interaction=interaction, num_step_set2_set=2,
-                       num_layer_set2set=1)
     model.to(device)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
+    # Create data loaders
+    train_dataset = Dataclass(train_data)
+    val_dataset = Dataclass(val_data)
     
-    print(f"▶️ Starting training: {len(train_ds)} train samples, {len(valid_ds)} valid samples")
-    best = train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, project_name)
-    print(f"\n🏁 Training finished. Best validation loss: {best:.4f}")
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=config['batch_size'], 
+        shuffle=True,
+        collate_fn=collate
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['valid_batch_size'],
+        collate_fn=collate
+    )
+    
+    # Training setup
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
+    scheduler = ReduceLROnPlateau(
+        optimizer, 
+        patience=config['scheduler_patience'], 
+        mode='min', 
+        verbose=False
+    )
+    
+    # Train model
+    train_cv(
+        config['max_epochs'],
+        model,
+        optimizer,
+        scheduler,
+        train_loader,
+        val_loader
+    )
+    
+    # Evaluate on validation set
+    val_loss, val_mae = get_metrics(model, val_loader)
+    val_rmse = np.sqrt(val_loss)
+    
+    return val_rmse
 
-if __name__ == "__main__":
+def cross_validate_model(model_class, model_name, df, config):
+    """Perform 10-fold cross-validation with 5 repetitions"""
+    print(f"\n{'='*60}")
+    print(f"Running 10-fold CV with 5 repetitions for {model_name}")
+    print(f"{'='*60}")
+    
+    all_rmse_scores = []
+    
+    for rep in range(5):  # 5 repetitions
+        print(f"\nRepetition {rep + 1}/5")
+        rep_rmse_scores = []
+        
+        # Create KFold with different random state for each repetition
+        kfold = KFold(n_splits=10, shuffle=True, random_state=42 + rep)
+        
+        for fold, (train_idx, val_idx) in enumerate(kfold.split(df)):
+            print(f"  Fold {fold + 1}/10", end=" ")
+            
+            train_data = df.iloc[train_idx].reset_index(drop=True)
+            val_data = df.iloc[val_idx].reset_index(drop=True)
+            
+            rmse = run_single_fold(model_class, train_data, val_data, config, fold, rep)
+            rep_rmse_scores.append(rmse)
+            
+            print(f"RMSE: {rmse:.4f}")
+        
+        rep_avg_rmse = np.mean(rep_rmse_scores)
+        all_rmse_scores.extend(rep_rmse_scores)
+        print(f"  Repetition {rep + 1} Average RMSE: {rep_avg_rmse:.4f}")
+    
+    # Calculate final statistics
+    final_avg_rmse = np.mean(all_rmse_scores)
+    final_std_rmse = np.std(all_rmse_scores)
+    
+    print(f"\n{model_name} Final Results:")
+    print(f"Average RMSE over 50 folds (10×5): {final_avg_rmse:.4f} ± {final_std_rmse:.4f}")
+    
+    return {
+        'model_name': model_name,
+        'avg_rmse': final_avg_rmse,
+        'std_rmse': final_std_rmse,
+        'all_scores': all_rmse_scores
+    }
+
+def main():
+    # Data loading
+    print("Loading data...")
+    df = pd.read_csv('https://raw.githubusercontent.com/adithyamauryakr/CIGIN-DevaLab/refs/heads/master/CIGIN_V2/data/whole_data.csv')
+    df.columns = df.columns.str.strip()
+    
+    print(f"Total dataset size: {len(df)}")
+    print(f"Each fold will have ~{len(df)//10} samples for validation")
+    
+    results = []
+    
+    # Run cross-validation for selected models
+    if config['model_type'] in ['original', 'both']:
+        results.append(cross_validate_model(
+            CIGINModel, 
+            "Original_CIGIN", 
+            df, 
+            config
+        ))
+    
+    if config['model_type'] in ['transformer', 'both']:
+        results.append(cross_validate_model(
+            CIGINGraphTransformerModel,
+            "GraphTransformer_CIGIN",
+            df,
+            config
+        ))
+    
+    # Save and display final results
+    print(f"\n{'='*80}")
+    print("FINAL CROSS-VALIDATION RESULTS")
+    print(f"{'='*80}")
+    
+    for result in results:
+        print(f"{result['model_name']}: {result['avg_rmse']:.4f} ± {result['std_rmse']:.4f} RMSE")
+    
+    # Save detailed results
+    results_df = pd.DataFrame([
+        {
+            'model': r['model_name'],
+            'avg_rmse': r['avg_rmse'],
+            'std_rmse': r['std_rmse'],
+            'config': str(config)
+        } for r in results
+    ])
+    
+    results_df.to_csv(
+        f"runs/run-{config['project_name']}/cv_results.csv",
+        index=False
+    )
+    
+    # Save all individual scores for further analysis
+    for result in results:
+        scores_df = pd.DataFrame({
+            'fold_rmse': result['all_scores']
+        })
+        scores_df.to_csv(
+            f"runs/run-{config['project_name']}/{result['model_name']}_all_scores.csv",
+            index=False
+        )
+
+if __name__ == '__main__':
     main()
