@@ -43,7 +43,7 @@ parser.add_argument('--max_epochs', type=int, default=100,
                     help="Maximum training epochs (default: 100)")
 parser.add_argument('--batch_size', type=int, default=32,
                     help="Training batch size (default: 32)")
-parser.add_argument('--model_type', default='both', 
+parser.add_argument('--model_type', default='original', 
                     choices=['original', 'transformer', 'both'],
                     help="Which model(s) to train")
 parser.add_argument('--num_heads', type=int, default=6,
@@ -164,11 +164,6 @@ def main():
 
     print(f"Dataset sizes - Train: {len(train_df)}, Valid: {len(valid_df)}, Test: {len(test_df)}")
 
-    # Normalization
-    mean = train_df['delGsolv'].mean()
-    std = train_df['delGsolv'].std()
-    for split in [train_df, valid_df, test_df]:
-        split['delGsolv'] = (split['delGsolv'] - mean) / std
 
     train_dataset = Dataclass(train_df)
     valid_dataset = Dataclass(valid_df)
@@ -183,14 +178,6 @@ def main():
     if config['model_type'] in ['original', 'both']:
         original_model = CIGINModel(interaction=config['interaction'], node_hidden_dim=42)
         results.append(train_and_evaluate_model(original_model, "Original_CIGIN", config, train_loader, valid_loader, test_loader))
-
-    if config['model_type'] in ['transformer', 'both']:
-        transformer_model = CIGINGraphTransformerModel(
-            interaction=config['interaction'],
-            node_hidden_dim=config['hidden_dim'],
-            num_heads=config['num_heads']
-        )
-        results.append(train_and_evaluate_model(transformer_model, "GraphTransformer_CIGIN", config, train_loader, valid_loader, test_loader))
 
     if len(results) > 1:
         print(f"\n{'='*80}")
