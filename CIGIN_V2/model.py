@@ -1,79 +1,54 @@
 import numpy as np
-import dgl
-from dgl.nn.pytorch import Set2Set, NNConv
+import math
+
+from dgl import DGLGraph
+from dgl.nn.pytorch import Set2Set, NNConv, GATConv
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class GatherModel(nn.Module):
     """
-    MPNN from Neural Message Passing for Quantum Chemistry
-    Fixed dimension handling
+    Original MPNN from CIGIN paper (unchanged)
     """
-
     def __init__(self,
                  node_input_dim=42,
                  edge_input_dim=10,
                  node_hidden_dim=42,
                  edge_hidden_dim=42,
-                 num_step_message_passing=6):
+                 num_step_message_passing=6,
+                 ):
         super(GatherModel, self).__init__()
         self.num_step_message_passing = num_step_message_passing
-        self.node_hidden_dim = node_hidden_dim
-        
         self.lin0 = nn.Linear(node_input_dim, node_hidden_dim)
-        # Fixed: Input dimension should be node_hidden_dim, not 2 * node_hidden_dim
-        self.message_layer = nn.Linear(node_hidden_dim, node_hidden_dim)
-        
+        self.set2set = Set2Set(node_hidden_dim, 2, 1)
+        self.message_layer = nn.Linear(2 * node_hidden_dim, node_hidden_dim)
         edge_network = nn.Sequential(
-            nn.Linear(edge_input_dim, edge_hidden_dim), 
-            nn.ReLU(),
-            nn.Linear(edge_hidden_dim, node_hidden_dim * node_hidden_dim)
-        )
-        
+            nn.Linear(edge_input_dim, edge_hidden_dim), nn.ReLU(),
+            nn.Linear(edge_hidden_dim, node_hidden_dim * node_hidden_dim))
         self.conv = NNConv(in_feats=node_hidden_dim,
                            out_feats=node_hidden_dim,
                            edge_func=edge_network,
                            aggregator_type='sum',
-                           residual=True)
+                           residual=True
+                           )
 
     def forward(self, g, n_feat, e_feat):
-        """
-        Forward pass of GatherModel with proper error handling
-        """
-        try:
-            device = n_feat.device
-            init = n_feat.clone()
-            out = F.relu(self.lin0(n_feat))
-            
-            for i in range(self.num_step_message_passing):
-                if e_feat is not None and e_feat.numel() > 0 and g.number_of_edges() > 0:
-                    try:
-                        m = F.relu(self.conv(g, out, e_feat))
-                    except Exception as e:
-                        print(f"Warning: Conv layer failed, using residual connection: {e}")
-                        m = out
-                else:
-                    # Handle case when no edges exist
-                    m = out
-                
-                # Apply message layer
-                out = F.relu(self.message_layer(m))
-            
-            return out + init
-            
-        except Exception as e:
-            print(f"Error in GatherModel forward: {e}")
-            # Return input as fallback
-            return n_feat
-
+        init = n_feat.clone()
+        out = F.relu(self.lin0(n_feat))
+        for i in range(self.num_step_message_passing):
+            if e_feat is not None:
+                m = torch.relu(self.conv(g, out, e_feat))
+            else:
+                m = torch.relu(self.conv.bias + self.conv.res_fc(out))
+            out = self.message_layer(torch.cat([m, out], dim=1))
+        return out + init
 
 class CIGINModel(nn.Module):
     """
-    Main CIGIN model class with fixed dimensions
+    Original CIGIN model (unchanged)
     """
-
     def __init__(self,
                  node_input_dim=42,
                  edge_input_dim=10,
@@ -82,7 +57,8 @@ class CIGINModel(nn.Module):
                  num_step_message_passing=6,
                  interaction='dot',
                  num_step_set2_set=2,
-                 num_layer_set2set=1):
+                 num_layer_set2set=1,
+                 ):
         super(CIGINModel, self).__init__()
 
         self.node_input_dim = node_input_dim
@@ -91,188 +67,352 @@ class CIGINModel(nn.Module):
         self.edge_hidden_dim = edge_hidden_dim
         self.num_step_message_passing = num_step_message_passing
         self.interaction = interaction
-
-        self.solute_gather = GatherModel(
-            self.node_input_dim, self.edge_input_dim,
-            self.node_hidden_dim, self.edge_input_dim,
-            self.num_step_message_passing)
-        
-        self.solvent_gather = GatherModel(
-            self.node_input_dim, self.edge_input_dim,
-            self.node_hidden_dim, self.edge_input_dim,
-            self.num_step_message_passing)
-
-        # Fixed: Set2Set output dimension is 2 * node_hidden_dim
-        # After concatenation: 2 * (2 * node_hidden_dim) = 4 * node_hidden_dim
-        self.fc1 = nn.Linear(4 * self.node_hidden_dim, 256)
+        self.solute_gather = GatherModel(self.node_input_dim, self.edge_input_dim,
+                                         self.node_hidden_dim, self.edge_input_dim,
+                                         self.num_step_message_passing,
+                                         )
+        self.solvent_gather = GatherModel(self.node_input_dim, self.edge_input_dim,
+                                          self.node_hidden_dim, self.edge_input_dim,
+                                          self.num_step_message_passing,
+                                          )
+        # These three are the FFNN for prediction phase
+        self.fc1 = nn.Linear(8 * self.node_hidden_dim, 256)
         self.fc2 = nn.Linear(256, 128)
         self.fc3 = nn.Linear(128, 1)
-        self.dropout = nn.Dropout(0.1)
-        
-        if interaction in ['general', 'tanh-general']:
-            self.imap = nn.Linear(2 * self.node_hidden_dim, 1)
+        self.imap = nn.Linear(80, 1)
 
         self.num_step_set2set = num_step_set2_set
         self.num_layer_set2set = num_layer_set2set
-        # Fixed: Set2Set input should be 2 * node_hidden_dim (after concatenation)
         self.set2set_solute = Set2Set(2 * node_hidden_dim, self.num_step_set2set, self.num_layer_set2set)
         self.set2set_solvent = Set2Set(2 * node_hidden_dim, self.num_step_set2set, self.num_layer_set2set)
 
     def forward(self, data):
+        solute = data[0]
+        solvent = data[1]
+        solute_len = data[2]
+        solvent_len = data[3]
+        # node embeddings after interaction phase
+        solute_features = self.solute_gather(solute, solute.ndata['x'].float(), solute.edata['w'].float())
         try:
-            solute, solvent, solute_len, solvent_len = data
-            device = next(self.parameters()).device
+            # if edge exists in a molecule
+            solvent_features = self.solvent_gather(solvent, solvent.ndata['x'].float(), solvent.edata['w'].float())
+        except:
+            # if edge doesn't exist in a molecule, for example in case of water
+            solvent_features = self.solvent_gather(solvent, solvent.ndata['x'].float(), None)
+
+        # Interaction phase
+        len_map = torch.mm(solute_len.t(), solvent_len)
+
+        if 'dot' not in self.interaction:
+            X1 = solute_features.unsqueeze(0)
+            Y1 = solvent_features.unsqueeze(1)
+            X2 = X1.repeat(solvent_features.shape[0], 1, 1)
+            Y2 = Y1.repeat(1, solute_features.shape[0], 1)
+            Z = torch.cat([X2, Y2], -1)
+
+            if self.interaction == 'general':
+                interaction_map = self.imap(Z).squeeze(2)
+            if self.interaction == 'tanh-general':
+                interaction_map = torch.tanh(self.imap(Z)).squeeze(2)
+
+            interaction_map = torch.mul(len_map.float(), interaction_map.t())
+            ret_interaction_map = torch.clone(interaction_map)
+
+        elif 'dot' in self.interaction:
+            interaction_map = torch.mm(solute_features, solvent_features.t())
+            if 'scaled' in self.interaction:
+                interaction_map = interaction_map / (np.sqrt(self.node_hidden_dim))
+
+            ret_interaction_map = torch.clone(interaction_map)
+            ret_interaction_map = torch.mul(len_map.float(), ret_interaction_map)
+            interaction_map = torch.tanh(interaction_map)
+            interaction_map = torch.mul(len_map.float(), interaction_map)
+
+        solvent_prime = torch.mm(interaction_map.t(), solute_features)
+        solute_prime = torch.mm(interaction_map, solvent_features)
+
+        # Prediction phase
+        solute_features = torch.cat((solute_features, solute_prime), dim=1)
+        solvent_features = torch.cat((solvent_features, solvent_prime), dim=1)
+
+        solute_features = self.set2set_solute(solute, solute_features)
+        solvent_features = self.set2set_solvent(solvent, solvent_features)
+
+        final_features = torch.cat((solute_features, solvent_features), 1)
+        predictions = torch.relu(self.fc1(final_features))
+        predictions = torch.relu(self.fc2(predictions))
+        predictions = self.fc3(predictions)
+
+        return predictions, ret_interaction_map
+
+class GraphTransformerLayer(nn.Module):
+    """
+    Graph Transformer Layer that replaces message passing while maintaining original dimensions
+    """
+    def __init__(self, in_dim, out_dim, num_heads=6, dropout=0.1):
+        super(GraphTransformerLayer, self).__init__()
+        assert out_dim == 42, "Must maintain original hidden_dim=42"
+        assert out_dim % num_heads == 0, "out_dim must be divisible by num_heads"
+        
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.num_heads = num_heads
+        self.head_dim = out_dim // num_heads
+        
+        # Linear projections for Q, K, V
+        self.q_proj = nn.Linear(in_dim, out_dim)
+        self.k_proj = nn.Linear(in_dim, out_dim)
+        self.v_proj = nn.Linear(in_dim, out_dim)
+        
+        # Output projection
+        self.out_proj = nn.Linear(out_dim, out_dim)
+        
+        # Dropout and normalization
+        self.dropout = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(out_dim)
+        self.norm2 = nn.LayerNorm(out_dim)
+        
+        # Feed-forward network (maintain original capacity)
+        self.ffn = nn.Sequential(
+            nn.Linear(out_dim, 4 * out_dim),  # 42->168
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(4 * out_dim, out_dim),  # 168->42
+            nn.Dropout(dropout)
+        )
+        
+        # Edge embedding for positional encoding
+        self.edge_encoder = nn.Linear(10, num_heads)
+
+    def forward(self, g, node_feat, edge_feat=None):
+        num_nodes = node_feat.size(0)
+        
+        # Project to Q, K, V
+        Q = self.q_proj(node_feat).view(num_nodes, self.num_heads, self.head_dim)
+        K = self.k_proj(node_feat).view(num_nodes, self.num_heads, self.head_dim)
+        V = self.v_proj(node_feat).view(num_nodes, self.num_heads, self.head_dim)
+        
+        # Compute attention scores
+        scores = torch.einsum('ihd,jhd->ijh', Q, K) / math.sqrt(self.head_dim)
+        
+        # Add edge features as bias if available
+        if edge_feat is not None:
+            src, dst = g.edges()
+            edge_bias = self.edge_encoder(edge_feat).view(-1, self.num_heads)
+            bias_matrix = torch.zeros(num_nodes, num_nodes, self.num_heads, device=scores.device)
+            bias_matrix[src, dst] = edge_bias
+            scores = scores + bias_matrix
+        
+        # Create adjacency mask
+        adj_mask = torch.zeros(num_nodes, num_nodes, device=scores.device)
+        if g.number_of_edges() > 0:
+            src, dst = g.edges()
+            adj_mask[src, dst] = 1
+            adj_mask[dst, src] = 1  # Undirected graphs
+        adj_mask.fill_diagonal_(1)  # Self-connections
+        
+        # Apply mask and softmax
+        scores = scores.masked_fill(adj_mask.unsqueeze(-1) == 0, float('-inf'))
+        attn_weights = F.softmax(scores, dim=1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention to values
+        out = torch.einsum('ijh,jhd->ihd', attn_weights, V)
+        out = out.contiguous().view(num_nodes, -1)
+        out = self.out_proj(out)
+        
+        # Residual connection and normalization
+        out = self.norm1(out + node_feat)
+        ffn_out = self.ffn(out)
+        out = self.norm2(out + ffn_out)
+        
+        return out
+
+class GraphTransformerPooling(nn.Module):
+    """
+    Graph Transformer-based pooling that matches Set2Set output dimensions
+    """
+    def __init__(self, in_dim, out_dim, num_heads=6):
+        super(GraphTransformerPooling, self).__init__()
+        assert out_dim == 168, "Must match Set2Set output dimension (4*42=168)"
+        
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.num_heads = num_heads
+        
+        # Global attention for pooling
+        self.global_attention = nn.MultiheadAttention(
+            embed_dim=in_dim,
+            num_heads=num_heads,
+            batch_first=True
+        )
+        
+        # Learnable query vector
+        self.global_query = nn.Parameter(torch.randn(1, 1, in_dim))
+        
+        # Output projection to match Set2Set
+        self.output_proj = nn.Linear(in_dim, out_dim)
+
+    def forward(self, g, node_feat):
+        batch_sizes = g.batch_num_nodes().tolist() if hasattr(g, 'batch_num_nodes') else [node_feat.size(0)]
+        outputs = []
+        start_idx = 0
+        
+        for num_nodes in batch_sizes:
+            graph_nodes = node_feat[start_idx:start_idx + num_nodes].unsqueeze(0)
+            global_query = self.global_query.expand(1, -1, -1)
             
-            # Ensure everything is on the same device
-            solute = solute.to(device)
-            solvent = solvent.to(device)
+            pooled_feat, _ = self.global_attention(global_query, graph_nodes, graph_nodes)
+            pooled_feat = pooled_feat.squeeze(0).squeeze(0)
+            outputs.append(pooled_feat)
+            start_idx += num_nodes
+        
+        output = torch.stack(outputs, dim=0) if len(batch_sizes) > 1 else outputs[0].unsqueeze(0)
+        return self.output_proj(output)
+
+class GraphTransformerGatherModel(nn.Module):
+    """
+    Graph Transformer version of GatherModel maintaining original parameters
+    """
+    def __init__(self,
+                 node_input_dim=42,
+                 edge_input_dim=10,
+                 node_hidden_dim=42,
+                 edge_hidden_dim=42,
+                 num_step_message_passing=6,
+                 num_heads=6):
+        super(GraphTransformerGatherModel, self).__init__()
+        self.num_step_message_passing = num_step_message_passing
+        self.node_hidden_dim = node_hidden_dim
+        
+        # Input projection (same as original)
+        self.lin0 = nn.Linear(node_input_dim, node_hidden_dim)
+        
+        # Transformer layers
+        self.transformer_layers = nn.ModuleList([
+            GraphTransformerLayer(
+                in_dim=node_hidden_dim,
+                out_dim=node_hidden_dim,
+                num_heads=num_heads
+            ) for _ in range(num_step_message_passing)
+        ])
+
+    def forward(self, g, n_feat, e_feat):
+        init = n_feat.clone()
+        out = F.relu(self.lin0(n_feat))
+        
+        for layer in self.transformer_layers:
+            out = layer(g, out, e_feat)
             
-            if not isinstance(solute_len, torch.Tensor):
-                solute_len = torch.tensor(solute_len, dtype=torch.float32, device=device)
-            else:
-                solute_len = solute_len.to(device).float()
-                
-            if not isinstance(solvent_len, torch.Tensor):
-                solvent_len = torch.tensor(solvent_len, dtype=torch.float32, device=device)
-            else:
-                solvent_len = solvent_len.to(device).float()
+        return out + init  # Residual connection
 
-            # Get node features
-            solute_node_feat = solute.ndata['x'].to(device)
-            solvent_node_feat = solvent.ndata['x'].to(device)
+class CIGINGraphTransformerModel(nn.Module):
+    """
+    CIGIN with Graph Transformers maintaining original parameters
+    """
+    def __init__(self,
+                 node_input_dim=42,
+                 edge_input_dim=10,
+                 node_hidden_dim=42,
+                 edge_hidden_dim=42,
+                 num_step_message_passing=6,
+                 interaction='dot',
+                 num_heads=6):
+        super(CIGINGraphTransformerModel, self).__init__()
 
-            # Verify input dimensions
-            assert solute_node_feat.shape[1] == 42, f"Expected 42D node features, got {solute_node_feat.shape[1]}"
-            assert solvent_node_feat.shape[1] == 42, f"Expected 42D node features, got {solvent_node_feat.shape[1]}"
+        # Maintain all original dimensions
+        self.node_input_dim = node_input_dim
+        self.node_hidden_dim = node_hidden_dim
+        self.edge_input_dim = edge_input_dim
+        self.edge_hidden_dim = edge_hidden_dim
+        self.num_step_message_passing = num_step_message_passing
+        self.interaction = interaction
+        
+        # Transformer-based gather models
+        self.solute_gather = GraphTransformerGatherModel(
+            node_input_dim, edge_input_dim,
+            node_hidden_dim, edge_hidden_dim,
+            num_step_message_passing, num_heads
+        )
+        self.solvent_gather = GraphTransformerGatherModel(
+            node_input_dim, edge_input_dim,
+            node_hidden_dim, edge_hidden_dim,
+            num_step_message_passing, num_heads
+        )
+        
+        # Transformer pooling (replacing Set2Set)
+        self.transformer_pool_solute = GraphTransformerPooling(
+            in_dim=2 * node_hidden_dim,
+            out_dim=4 * node_hidden_dim,
+            num_heads=6
+        )
+        self.transformer_pool_solvent = GraphTransformerPooling(
+            in_dim=2 * node_hidden_dim,
+            out_dim=4 * node_hidden_dim,
+            num_heads=6
+        )
+        
+        # Maintain original FFNN architecture
+        self.fc1 = nn.Linear(8 * node_hidden_dim, 256)
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128, 1)
+        self.imap = nn.Linear(80, 1)
 
-            # Get edge features with proper handling
-            solute_edge_feat = None
-            if 'w' in solute.edata and solute.number_of_edges() > 0:
-                solute_edge_feat = solute.edata['w'].to(device)
-                if solute_edge_feat.numel() == 0:
-                    solute_edge_feat = None
+    def forward(self, data):
+        # Identical forward pass structure to original
+        solute = data[0]
+        solvent = data[1]
+        solute_len = data[2]
+        solvent_len = data[3]
+        
+        # Node embeddings
+        solute_features = self.solute_gather(solute, solute.ndata['x'].float(), solute.edata['w'].float())
+        try:
+            solvent_features = self.solvent_gather(solvent, solvent.ndata['x'].float(), solvent.edata['w'].float())
+        except:
+            solvent_features = self.solvent_gather(solvent, solvent.ndata['x'].float(), None)
 
-            solvent_edge_feat = None
-            if 'w' in solvent.edata and solvent.number_of_edges() > 0:
-                solvent_edge_feat = solvent.edata['w'].to(device)
-                if solvent_edge_feat.numel() == 0:
-                    solvent_edge_feat = None
+        # Original interaction phase (unchanged)
+        len_map = torch.mm(solute_len.t(), solvent_len)
 
-            # Node embeddings after message passing
-            solute_features = self.solute_gather(solute, solute_node_feat, solute_edge_feat)
-            solvent_features = self.solvent_gather(solvent, solvent_node_feat, solvent_edge_feat)
+        if 'dot' not in self.interaction:
+            X1 = solute_features.unsqueeze(0)
+            Y1 = solvent_features.unsqueeze(1)
+            X2 = X1.repeat(solvent_features.shape[0], 1, 1)
+            Y2 = Y1.repeat(1, solute_features.shape[0], 1)
+            Z = torch.cat([X2, Y2], -1)
 
-            # Ensure we have valid features
-            if solute_features.shape[0] == 0 or solvent_features.shape[0] == 0:
-                batch_size = max(1, solute_len.shape[0] if len(solute_len.shape) > 0 else 1)
-                return torch.zeros(batch_size, 1, device=device), torch.zeros(1, 1, device=device)
+            if self.interaction == 'general':
+                interaction_map = self.imap(Z).squeeze(2)
+            if self.interaction == 'tanh-general':
+                interaction_map = torch.tanh(self.imap(Z)).squeeze(2)
 
-            # Create length matrices for interaction computation
-            try:
-                # Get batch information
-                solute_batch_sizes = solute.batch_num_nodes().cpu().numpy()
-                solvent_batch_sizes = solvent.batch_num_nodes().cpu().numpy()
-                
-                batch_size = len(solute_batch_sizes)
-                
-                # Simple dot product interaction for batched data
-                # We'll use mean pooling to get graph-level representations first
-                solute_graph_embeddings = []
-                solvent_graph_embeddings = []
-                
-                # Split features by batch
-                solute_start = 0
-                solvent_start = 0
-                
-                for i in range(batch_size):
-                    sol_end = solute_start + solute_batch_sizes[i]
-                    solv_end = solvent_start + solvent_batch_sizes[i]
-                    
-                    sol_feat = solute_features[solute_start:sol_end]
-                    solv_feat = solvent_features[solvent_start:solv_end]
-                    
-                    # Simple mean pooling for now
-                    sol_embed = torch.mean(sol_feat, dim=0, keepdim=True)
-                    solv_embed = torch.mean(solv_feat, dim=0, keepdim=True)
-                    
-                    solute_graph_embeddings.append(sol_embed)
-                    solvent_graph_embeddings.append(solv_embed)
-                    
-                    solute_start = sol_end
-                    solvent_start = solv_end
-                
-                # Stack embeddings
-                solute_batch_embed = torch.cat(solute_graph_embeddings, dim=0)  # [batch_size, hidden_dim]
-                solvent_batch_embed = torch.cat(solvent_graph_embeddings, dim=0)  # [batch_size, hidden_dim]
-                
-                # Create interaction features (simple concatenation for now)
-                solute_features_final = torch.cat([solute_batch_embed, solute_batch_embed], dim=1)  # [batch_size, 2*hidden_dim]
-                solvent_features_final = torch.cat([solvent_batch_embed, solvent_batch_embed], dim=1)  # [batch_size, 2*hidden_dim]
-                
-            except Exception as e:
-                print(f"Warning: Interaction computation failed, using simple pooling: {e}")
-                # Fallback to simple mean pooling
-                solute_features_final = torch.cat([
-                    torch.mean(solute_features, dim=0, keepdim=True),
-                    torch.mean(solute_features, dim=0, keepdim=True)
-                ], dim=1)
-                solvent_features_final = torch.cat([
-                    torch.mean(solvent_features, dim=0, keepdim=True),
-                    torch.mean(solvent_features, dim=0, keepdim=True)
-                ], dim=1)
+            interaction_map = torch.mul(len_map.float(), interaction_map.t())
+            ret_interaction_map = torch.clone(interaction_map)
 
-            # Set2Set aggregation - use dummy graphs since we already have graph-level features
-            try:
-                # Create dummy single-node graphs for Set2Set
-                dummy_graph = dgl.graph(([], []), num_nodes=1, device=device)
-                
-                # Use the computed features directly
-                solute_graph_feat = torch.mean(solute_features_final, dim=0, keepdim=True)  # [1, 2*hidden_dim]
-                solvent_graph_feat = torch.mean(solvent_features_final, dim=0, keepdim=True)  # [1, 2*hidden_dim]
-                
-                # Set2Set expects [num_nodes, feature_dim], outputs [batch_size, 2*feature_dim]
-                # Since we have [batch_size, 2*hidden_dim], Set2Set will output [batch_size, 4*hidden_dim]
-                # But we'll use mean pooling instead to avoid dimension issues
-                
-            except Exception as e:
-                print(f"Warning: Set2Set failed, using mean pooling: {e}")
-                solute_graph_feat = torch.mean(solute_features_final, dim=0, keepdim=True)
-                solvent_graph_feat = torch.mean(solvent_features_final, dim=0, keepdim=True)
+        elif 'dot' in self.interaction:
+            interaction_map = torch.mm(solute_features, solvent_features.t())
+            if 'scaled' in self.interaction:
+                interaction_map = interaction_map / (np.sqrt(self.node_hidden_dim))
 
-            # Ensure we have the right dimensions for final FC layers
-            # Expected: 4 * node_hidden_dim = 4 * 42 = 168
-            expected_dim = 4 * self.node_hidden_dim
-            
-            # Concatenate solute and solvent features
-            combined_features = torch.cat([solute_graph_feat, solvent_graph_feat], dim=1)
-            
-            # Adjust dimensions if necessary
-            if combined_features.shape[1] != expected_dim:
-                print(f"Adjusting feature dimension from {combined_features.shape[1]} to {expected_dim}")
-                if combined_features.shape[1] < expected_dim:
-                    # Pad with zeros
-                    padding = torch.zeros(combined_features.shape[0], expected_dim - combined_features.shape[1], device=device)
-                    combined_features = torch.cat([combined_features, padding], dim=1)
-                else:
-                    # Truncate
-                    combined_features = combined_features[:, :expected_dim]
+            ret_interaction_map = torch.clone(interaction_map)
+            ret_interaction_map = torch.mul(len_map.float(), ret_interaction_map)
+            interaction_map = torch.tanh(interaction_map)
+            interaction_map = torch.mul(len_map.float(), interaction_map)
 
-            # Final prediction
-            predictions = F.relu(self.fc1(combined_features))
-            predictions = self.dropout(predictions)
-            predictions = F.relu(self.fc2(predictions))
-            predictions = self.dropout(predictions)
-            predictions = self.fc3(predictions)
+        solvent_prime = torch.mm(interaction_map.t(), solute_features)
+        solute_prime = torch.mm(interaction_map, solvent_features)
 
-            # Create dummy interaction map
-            ret_interaction_map = torch.zeros(solute_features.shape[0], solvent_features.shape[0], device=device)
+        # Prediction phase with transformer pooling
+        solute_features = torch.cat((solute_features, solute_prime), dim=1)
+        solvent_features = torch.cat((solvent_features, solvent_prime), dim=1)
 
-            return predictions, ret_interaction_map
+        solute_features = self.transformer_pool_solute(solute, solute_features)
+        solvent_features = self.transformer_pool_solvent(solvent, solvent_features)
 
-        except Exception as e:
-            print(f"Error in CIGINModel forward: {e}")
-            import traceback
-            traceback.print_exc()
-            # Return dummy outputs to prevent crashes
-            device = next(self.parameters()).device
-            return torch.zeros(1, 1, device=device), torch.zeros(1, 1, device=device)
+        final_features = torch.cat((solute_features, solvent_features), 1)
+        predictions = torch.relu(self.fc1(final_features))
+        predictions = torch.relu(self.fc2(predictions))
+        predictions = self.fc3(predictions)
+
+        return predictions, ret_interaction_map
