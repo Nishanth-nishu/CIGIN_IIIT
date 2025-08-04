@@ -62,9 +62,6 @@ def collate(samples):
 class Dataclass(Dataset):
     def __init__(self, dataset):
         self.dataset = dataset
-        # Normalize delGsolv values
-        self.mean = dataset['delGsolv'].mean()
-        self.std = dataset['delGsolv'].std()
 
     def __len__(self):
         return len(self.dataset)
@@ -84,7 +81,6 @@ class Dataclass(Dataset):
         
         delta_g = self.dataset.iloc[idx]['delGsolv']
         # Normalize delta_g
-        delta_g = (delta_g - self.mean) / self.std
         return [solute_graph, solvent_graph, [delta_g]]
 
 
