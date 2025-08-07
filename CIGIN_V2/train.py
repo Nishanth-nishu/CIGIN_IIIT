@@ -31,7 +31,7 @@ class EnhancedTrainer:
     def train_epoch(self, model, optimizer, train_loader, grad_clip=None):
         model.train()
         epoch_loss = 0
-        for solute, solvent, solute_len, solvent_len, labels in tqdm(train_loader, desc="Training"):
+        for solute, solvent, solute_len, solvent_len, labels in tqdm(train_loader, desc="Training", leave=False):
             optimizer.zero_grad()
             
             # Convert all inputs to proper tensors and device
@@ -89,6 +89,68 @@ def train(max_epochs, model, optimizer, scheduler, train_loader, valid_loader, p
                 'loss': val_loss,
             }, save_path)
             print(f"Saved new best model to {save_path}")
+
+def train_cv(max_epochs, model, optimizer, scheduler, train_loader, valid_loader):
+    """Training function for cross-validation (no model saving, minimal output)"""
+    trainer = EnhancedTrainer()
+    best_val_loss = float('inf')
+    patience_counter = 0
+    early_stop_patience = 10  # Stop if no improvement for 10 epochs
+    
+    for epoch in range(max_epochs):
+        # Training
+        train_loss = trainer.train_epoch(model, optimizer, train_loader)
+        
+        # Validation
+        val_loss, val_mae = trainer.compute_metrics(model, valid_loader)
+        scheduler.step(val_loss)
+        
+        # Early stopping check
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            
+        if patience_counter >= early_stop_patience:
+            break
+
+def train_full_data(max_epochs, model, optimizer, scheduler, train_loader, project_name):
+    """Training function for full dataset (no validation, just training)"""
+    trainer = EnhancedTrainer()
+    
+    # Create directory if it doesn't exist
+    save_dir = f"./runs/run-{project_name}/models"
+    os.makedirs(save_dir, exist_ok=True)
+    
+    for epoch in range(max_epochs):
+        # Training
+        train_loss = trainer.train_epoch(model, optimizer, train_loader)
+        
+        # Update scheduler based on training loss (no validation available)
+        scheduler.step(train_loss)
+        
+        # Logging
+        print(f"Epoch {epoch+1}/{max_epochs}: Train Loss: {train_loss:.4f}")
+        
+        # Save model every 20 epochs and at the end
+        if (epoch + 1) % 20 == 0 or epoch == max_epochs - 1:
+            save_path = os.path.join(save_dir, f"{project_name.split('_')[-1]}_epoch_{epoch+1}.tar")
+            torch.save({
+                'epoch': epoch,
+                'model_state': model.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'loss': train_loss,
+            }, save_path)
+    
+    # Save final model
+    final_save_path = os.path.join(save_dir, f"{project_name.split('_')[-1]}_final.tar")
+    torch.save({
+        'epoch': max_epochs,
+        'model_state': model.state_dict(),
+        'optimizer_state': optimizer.state_dict(),
+        'final_loss': train_loss,
+    }, final_save_path)
 
 def get_metrics(model, data_loader):
     trainer = EnhancedTrainer()
