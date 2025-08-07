@@ -3,7 +3,6 @@ import pandas as pd
 import warnings
 import os
 import argparse
-from sklearn.model_selection import train_test_split
 import numpy as np
 import time
 
@@ -22,7 +21,7 @@ import dgl
 
 # local imports
 from model import CIGINModel, CIGINGraphTransformerModel
-from train import train, get_metrics
+from train import train_full_data, get_metrics
 from molecular_graph import get_graph_from_smile
 from utils import *
 
@@ -33,8 +32,8 @@ rdBase.DisableLog('rdApp.error')
 warnings.filterwarnings("ignore")
 
 # Argument parsing
-parser = argparse.ArgumentParser(description='CIGIN Model Comparison')
-parser.add_argument('--name', default='cigin', help="Project name (default: cigin)")
+parser = argparse.ArgumentParser(description='CIGIN Model Training on 100% Data')
+parser.add_argument('--name', default='cigin_full', help="Project name (default: cigin_full)")
 parser.add_argument('--interaction', default='dot', 
                     choices=['dot', 'scaled-dot', 'general', 'tanh-general'],
                     help="Interaction function type")
@@ -66,9 +65,7 @@ config = {
     'num_heads': args.num_heads,
     'hidden_dim': args.hidden_dim,
     'learning_rate': args.lr,
-    'scheduler_patience': args.scheduler_patience,
-    'valid_batch_size': 128,  # Kept same as original
-    'test_batch_size': 128    # Kept same as original
+    'scheduler_patience': args.scheduler_patience
 }
 
 # Ensure hidden_dim is divisible by num_heads
@@ -119,20 +116,21 @@ class Dataclass(Dataset):
         return [solute_graph, solvent_graph, [delta_g]]
 
 def count_parameters(model):
-    """Count trainable parameters (added feature)"""
+    """Count trainable parameters"""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def train_and_evaluate_model(model, model_name, config, train_loader, valid_loader, test_loader):
-    """Enhanced training function with metrics tracking"""
+def train_and_save_model(model, model_name, config, train_loader):
+    """Train model on full dataset and save"""
     print(f"\n{'='*50}")
-    print(f"Training {model_name}")
+    print(f"Training {model_name} on 100% data")
     print(f"Parameters: {count_parameters(model):,}")
+    print(f"Training samples: {len(train_loader.dataset)}")
     print(f"Config: {config}")
     print(f"{'='*50}")
     
     model.to(device)
     
-    # Training setup (matches original parameters)
+    # Training setup
     optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
     scheduler = ReduceLROnPlateau(
         optimizer, 
@@ -143,71 +141,43 @@ def train_and_evaluate_model(model, model_name, config, train_loader, valid_load
     
     start_time = time.time()
     
-    # Train (using original training function)
-    train(
+    # Train on full data
+    train_full_data(
         config['max_epochs'],
         model,
         optimizer,
         scheduler,
         train_loader,
-        valid_loader,
         f"{config['project_name']}_{model_name}"
     )
     
     training_time = time.time() - start_time
     
-    # Evaluation
-    model.eval()
-    test_loss, test_mae = get_metrics(model, test_loader)
-    test_rmse = np.sqrt(test_loss)
-    
-    print(f"\n{model_name} Results:")
+    print(f"\n{model_name} Training Complete:")
     print(f"Training Time: {training_time/60:.2f} minutes")
-    print(f"Test MSE: {test_loss:.4f}")
-    print(f"Test MAE: {test_mae:.4f}")
-    print(f"Test RMSE: {test_rmse:.4f}")
+    print(f"Model saved to: ./runs/run-{config['project_name']}/models/{model_name}_final.tar")
     
     return {
         'model_name': model_name,
         'parameters': count_parameters(model),
-        'test_mse': test_loss,
-        'test_mae': test_mae,
-        'test_rmse': test_rmse,
         'training_time': training_time,
         'config': config
     }
 
 def main():
-    # Data loading and splitting (identical to original)
+    # Data loading - USE 100% OF DATA
     print("Loading data...")
     df = pd.read_csv('https://raw.githubusercontent.com/adithyamauryakr/CIGIN-DevaLab/refs/heads/master/CIGIN_V2/data/whole_data.csv')
     df.columns = df.columns.str.strip()
     
-    # Same split as original (80/10/10)
-    train_df, test_df = train_test_split(df, test_size=0.1, random_state=42)
-    train_df, valid_df = train_test_split(train_df, test_size=0.111, random_state=42)
-    
-    print(f"Dataset sizes - Train: {len(train_df)}, Valid: {len(valid_df)}, Test: {len(test_df)}")
+    print(f"Training on 100% of dataset: {len(df)} samples")
 
-    # Create datasets and loaders (same as original)
-    train_dataset = Dataclass(train_df)
-    valid_dataset = Dataclass(valid_df)
-    test_dataset = Dataclass(test_df)
-
+    # Create dataset and loader for ALL data
+    full_dataset = Dataclass(df)
     train_loader = DataLoader(
-        train_dataset, 
+        full_dataset, 
         batch_size=config['batch_size'], 
         shuffle=True,
-        collate_fn=collate
-    )
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=config['valid_batch_size'],
-        collate_fn=collate
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=config['test_batch_size'],
         collate_fn=collate
     )
     
@@ -219,13 +189,11 @@ def main():
             interaction=config['interaction'],
             node_hidden_dim=42  # Force original dimension
         )
-        results.append(train_and_evaluate_model(
+        results.append(train_and_save_model(
             original_model, 
             "Original_CIGIN", 
             config,
-            train_loader, 
-            valid_loader, 
-            test_loader
+            train_loader
         ))
     
     if config['model_type'] in ['transformer', 'both']:
@@ -234,43 +202,31 @@ def main():
             node_hidden_dim=config['hidden_dim'],
             num_heads=config['num_heads']
         )
-        results.append(train_and_evaluate_model(
+        results.append(train_and_save_model(
             transformer_model,
             "GraphTransformer_CIGIN",
             config,
-            train_loader,
-            valid_loader,
-            test_loader
+            train_loader
         ))
     
-    # Benchmark comparison
-    if len(results) > 1:
-        print(f"\n{'='*80}")
-        print("BENCHMARK COMPARISON")
-        print(f"{'='*80}")
-        
-        # Print comparison table
-        print(f"{'Model':<25} {'Params':<12} {'MSE':<10} {'MAE':<10} {'RMSE':<10} {'Time (min)':<10}")
-        print('-'*80)
-        for r in results:
-            print(f"{r['model_name']:<25} {r['parameters']:<12,} {r['test_mse']:<10.4f} "
-                  f"{r['test_mae']:<10.4f} {r['test_rmse']:<10.4f} {r['training_time']/60:<10.2f}")
-        
-        # Calculate improvements
-        orig = next(r for r in results if 'Original' in r['model_name'])
-        trans = next(r for r in results if 'GraphTransformer' in r['model_name'])
-        
-        print(f"\nImprovement Analysis:")
-        print(f"- Parameters: {trans['parameters']/orig['parameters']:.2f}x")
-        print(f"- Training Time: {trans['training_time']/orig['training_time']:.2f}x")
-        print(f"- MSE: {(orig['test_mse']-trans['test_mse'])/orig['test_mse']*100:+.2f}%")
-        print(f"- MAE: {(orig['test_mae']-trans['test_mae'])/orig['test_mae']*100:+.2f}%")
-        
-        # Save results
-        pd.DataFrame(results).to_csv(
-            f"runs/run-{config['project_name']}/benchmark_results.csv",
-            index=False
-        )
+    # Summary
+    print(f"\n{'='*80}")
+    print("TRAINING SUMMARY")
+    print(f"{'='*80}")
+    
+    print(f"{'Model':<25} {'Params':<12} {'Time (min)':<10}")
+    print('-'*50)
+    for r in results:
+        print(f"{r['model_name']:<25} {r['parameters']:<12,} {r['training_time']/60:<10.2f}")
+    
+    # Save results
+    pd.DataFrame(results).to_csv(
+        f"runs/run-{config['project_name']}/training_results.csv",
+        index=False
+    )
+    
+    print(f"\nAll models trained on 100% data ({len(df)} samples)")
+    print(f"Results saved to: runs/run-{config['project_name']}/training_results.csv")
 
 if __name__ == '__main__':
     main()
