@@ -1,9 +1,9 @@
 import numpy as np
-from dgl import DGLGraph
+import dgl
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors as rdDesc
 from utils import one_of_k_encoding_unk, one_of_k_encoding
-
+import torch
 
 def get_atom_features(atom, stereo, features, explicit_H=False):
     """
@@ -24,20 +24,14 @@ def get_atom_features(atom, stereo, features, explicit_H=False):
         Chem.rdchem.HybridizationType.SP, Chem.rdchem.HybridizationType.SP2,
         Chem.rdchem.HybridizationType.SP3, Chem.rdchem.HybridizationType.SP3D])
     atom_features += [int(i) for i in list("{0:06b}".format(features))]
-
     if not explicit_H:
         atom_features += one_of_k_encoding_unk(atom.GetTotalNumHs(), [0, 1, 2, 3, 4])
-
     try:
         atom_features += one_of_k_encoding_unk(stereo, ['R', 'S'])
         atom_features += [atom.HasProp('_ChiralityPossible')]
     except Exception as e:
-
-        atom_features += [False, False
-                          ] + [atom.HasProp('_ChiralityPossible')]
-
+        atom_features += [False, False] + [atom.HasProp('_ChiralityPossible')]
     return np.array(atom_features)
-
 
 def get_bond_features(bond):
     """
@@ -45,7 +39,6 @@ def get_bond_features(bond):
     :param bond: rdkit bond object
     :return: bond features, 1d numpy array
     """
-
     bond_type = bond.GetBondType()
     bond_feats = [
         bond_type == Chem.rdchem.BondType.SINGLE, bond_type == Chem.rdchem.BondType.DOUBLE,
@@ -54,9 +47,7 @@ def get_bond_features(bond):
         bond.IsInRing()
     ]
     bond_feats += one_of_k_encoding_unk(str(bond.GetStereo()), ["STEREONONE", "STEREOANY", "STEREOZ", "STEREOE"])
-
     return np.array(bond_feats)
-
 
 def get_graph_from_smile(molecule_smile):
     """
@@ -65,32 +56,41 @@ def get_graph_from_smile(molecule_smile):
     :param molecule_smile: SMILE sequence
     :return: DGL graph object, Node features and Edge features
     """
-
-    G = DGLGraph()
     molecule = Chem.MolFromSmiles(molecule_smile)
     features = rdDesc.GetFeatureInvariants(molecule)
-
     stereo = Chem.FindMolChiralCenters(molecule)
     chiral_centers = [0] * molecule.GetNumAtoms()
     for i in stereo:
         chiral_centers[i[0]] = i[1]
-
-    G.add_nodes(molecule.GetNumAtoms())
+    
+    # Create graph with modern DGL API
+    G = dgl.graph([], num_nodes=molecule.GetNumAtoms())
     node_features = []
     edge_features = []
+    edges_src = []
+    edges_dst = []
+    
     for i in range(molecule.GetNumAtoms()):
-
         atom_i = molecule.GetAtomWithIdx(i)
         atom_i_features = get_atom_features(atom_i, chiral_centers[i], features[i])
         node_features.append(atom_i_features)
-
         for j in range(molecule.GetNumAtoms()):
             bond_ij = molecule.GetBondBetweenAtoms(i, j)
             if bond_ij is not None:
-                G.add_edge(i, j)
+                edges_src.append(i)
+                edges_dst.append(j)
                 bond_features_ij = get_bond_features(bond_ij)
                 edge_features.append(bond_features_ij)
-
-    G.ndata['x'] = np.array(node_features)
-    G.edata['w'] = np.array(edge_features)
+    
+    # Add edges to graph
+    if edges_src:
+        G.add_edges(edges_src, edges_dst)
+    
+    # MINIMAL PERFORMANCE FIX: Convert to numpy array first, then to tensor
+    G.ndata['x'] = torch.tensor(np.array(node_features))
+    if edge_features:  # Only if edges exist
+        G.edata['w'] = torch.tensor(np.array(edge_features))
+    else:
+        G.edata['w'] = torch.tensor([])  # Empty tensor for molecules with no bonds
+    
     return G
